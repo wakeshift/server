@@ -38,7 +38,7 @@ func (s *stream) expectClosed(code websocket.StatusCode, reason string) {
 // that holds no link, and its event wakes the thread, round after round.
 // Before, the link stayed live in the core, so every later redeem was
 // refused (409 conversation_taken, link_not_held) until it expired, and
-// those events waited, unwoken (the spike's real Codex runs, November 19).
+// those events waited, unwoken (seen with real Codex runs).
 // The same holds when the thread's hooks redeemed twice (two beacons
 // before the connector took one): every link of the session's that a
 // connector redeemed ends with its stream.

@@ -101,6 +101,18 @@ type grokBot struct {
 	// routine is the instruction this bot's routine was made with (the «»
 	// text Wakeshift gave it), which its runs follow.
 	routine string
+	// shown is the line its last key step's prove printed before
+	// Wakeshift's answer: which app, in which workspace, it proved to.
+	shown string
+}
+
+// splitShown separates prove's first line saying where it proves
+// (connector.grokShown) from Wakeshift's answer.
+func splitShown(out string) (shown, answer string) {
+	if first, rest, ok := strings.Cut(out, "\n"); ok && strings.HasPrefix(first, "Wakeshift: proving this bot's key") {
+		return first, rest
+	}
+	return "", out
 }
 
 var routineTextRE = regexp.MustCompile(`«([^»]+)»`)
@@ -190,7 +202,7 @@ func fetchChallenge(t *testing.T, c *coretest.Core, bot, id string) (int, string
 // keyStep follows GrokKeyNote (or GrokKeyMissingNote): the install
 // command, the connector's init, then its prove, each exactly as the text
 // gives it. It returns what prove printed (Wakeshift's answer).
-func (b *grokBot) keyStep(t *testing.T, text string) string {
+func (b *grokBot) keyStep(t *testing.T, text string) (answer string) {
 	t.Helper()
 	b.learnRoutine(text)
 	install, init, prove := installCmdRE.FindStringSubmatch(text), initCmdRE.FindStringSubmatch(text), proveCmdRE.FindStringSubmatch(text)
@@ -204,7 +216,7 @@ func (b *grokBot) keyStep(t *testing.T, text string) string {
 		t.Fatalf("init: %s", out)
 	}
 	b.memory = true
-	answer := b.vm.run(t, b.id, prove[1])
+	b.shown, answer = splitShown(b.vm.run(t, b.id, prove[1]))
 	b.learnRoutine(answer)
 	return answer
 }
@@ -373,7 +385,7 @@ func (f *fakeCursor) stop() {
 
 // A routine's run follows its instruction as a strict model does, in a
 // run whose CURSOR_CONVERSATION_ID is the run's own ID, not the bot's (as
-// Grok Bot's are: staging, November 8, 2026).
+// Grok Bot's are, as observed).
 var (
 	routineBotRE  = regexp.MustCompile("if \"bot\" isn't exactly `([^`]+)`")
 	routineRunRE  = regexp.MustCompile("\"wakeshift.challenge\": run exactly `([^`]+)`")

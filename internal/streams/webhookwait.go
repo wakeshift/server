@@ -10,15 +10,17 @@ import (
 )
 
 // A Grok Bot waits in the foreground on its session's one-shot wait until
-// its Automations webhook is bound; from then on the webhook delivers, so
-// a running wait would race it for the same messages. A wait on a session
-// with a bound, live Cursor Automations destination ends with hub.closed
-// "webhook" (WebhookNote), whether it was running when the webhook was
-// bound (EndWaitForWebhook) or started after. One whose destination died,
-// or needs setup, waits as before: the foreground wait is the fallback
-// again. With the webhook wake off (Server.CursorWebhooks), no wait ends
-// for a webhook: the deliverer skips Cursor destinations, so their
-// messages wait for the foreground wait, and none is stranded.
+// its webhook is bound. Grok Bot runs in Cursor's cloud, and its webhook is
+// a Cursor Automations routine's (agenthooks.KindCursor, stored as
+// "cursor-automations"). From then on the webhook delivers, so a running
+// wait would race it for the same messages. A wait on a session with a
+// bound, live webhook destination ends with hub.closed "webhook"
+// (WebhookNote), whether it was running when the webhook was bound
+// (EndWaitForWebhook) or started after. One whose destination died, or
+// needs setup, waits as before: the foreground wait is the fallback again.
+// With the webhook wake off (Server.CursorWebhooks), no wait ends for a
+// webhook: the deliverer skips these destinations, so their messages wait
+// for the foreground wait, and none is stranded.
 
 // WebhookNote is a wait's last line once the conversation's webhook
 // delivers its messages.
@@ -27,8 +29,9 @@ const WebhookNote = "Wake-ups now come through this bot's webhook; don't run thi
 // errWebhookBound: a wait found its session's webhook bound.
 var errWebhookBound = errors.New("streams: the session's webhook is bound")
 
-// webhookBound reports whether a session (target) has a bound, live Cursor
-// Automations destination, in the transaction's tenant.
+// webhookBound reports whether a session (target) has a bound, live Grok
+// Bot webhook (a Cursor Automations destination), in the transaction's
+// tenant.
 func webhookBound(ctx context.Context, tx pgx.Tx, target string) (bool, error) {
 	if !uuidRE.MatchString(target) {
 		return false, nil

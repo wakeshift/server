@@ -839,7 +839,7 @@ export class Realistic {
     r.metrics.kept_turn_open = !idle1;
     // Checking on the build in a turn it keeps open: unlike R1, the build keeps running. The user
     // answered the form and sets up now, as a user would, without waiting for the turn: the restart
-    // ends it, and the same build's finish is the wake (GPT-6.2 Sol keeps its turns open).
+    // ends it, and the same build's finish is the wake (Codex's default model keeps its turns open).
     const st1 = await this.ci.lane(l.id);
     const calls1 = this.since(st1, t1);
     const startCall = calls1.find((c) => c.tool === "start_build" && !c.isError);

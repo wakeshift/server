@@ -35,6 +35,8 @@ function describe(e: AuditEntry): string {
       return `Ended ${agent}'s sign-in: ${reasons[str(d.reason)] ?? str(d.reason)}`
     case 'app.connected':
       return `Started connecting ${app} to the workspace`
+    case 'stream_link.created':
+      return `Made a stream link for ${agent}, working until ${when(str(d.expires_at))}`
     case 'stream_links.revoked':
       return `Revoked ${agent}'s stream links (${num(d.revoked)})`
     case 'stream_link.renewed':

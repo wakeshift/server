@@ -169,6 +169,10 @@ func (a *API) streamLink(w http.ResponseWriter, r *http.Request) {
 	err := a.tx(r, func(ctx context.Context, tx pgx.Tx) (err error) {
 		// Each link is a session: a participant with its own handle,
 		// deliveries, position and presence. Its link rotates in-band.
+		before, _, err := appSessions(ctx, tx, act)
+		if err != nil {
+			return err
+		}
 		sess, err = sessions.Register(ctx, tx, sessions.New{Agent: act.agent, Resume: in.Session, Label: in.Label,
 			Conversation: in.Conversation, CreatedBy: "app:" + act.app})
 		if errors.Is(err, sessions.ErrNotFound) {
@@ -177,11 +181,56 @@ func (a *API) streamLink(w http.ResponseWriter, r *http.Request) {
 		if err != nil {
 			return badRequest{err}
 		}
+		if err := capNewSessions(ctx, tx, act, before); err != nil {
+			return err
+		}
 		u, exp, err = a.Streams.Mint(ctx, tx, act.tenant, streams.NewLink{Agent: act.agent, Target: sess.ID, Ack: in.Ack,
 			CreatedBy: "app:" + act.app, GrantID: act.grant.ID, TTL: streams.SessionLinkTTL})
 		return err
 	})
 	a.respond(w, map[string]string{"url": u, "expires_at": exp.UTC().Format(time.RFC3339), "session": sess.Handle}, err)
+}
+
+// MaxNewSessionsPerHour is how many new sessions an app's stream-links
+// requests may start for one agent in an hour (each with a link and,
+// once connected, a stream): far more conversations than one agent has,
+// and a bound on an app minting sessions to take an instance's streams.
+// Resuming a session, or naming a label or conversation it has, starts
+// none and isn't refused. A variable so tests can lower it.
+var MaxNewSessionsPerHour = 100
+
+// errTooManySessions: an app's stream-links request would start more than
+// MaxNewSessionsPerHour sessions for the agent.
+var errTooManySessions = errors.New("too many new sessions for this agent")
+
+// appSessions takes the agent's sessions lock, held to the end of the
+// transaction, and counts the sessions the app started for the agent: in
+// all, and in the last hour. It's the lock sessions.Register takes to
+// start a session (advisory locks are reentrant), so concurrent requests
+// count, register and count again one after another.
+func appSessions(ctx context.Context, tx pgx.Tx, act actor) (all, recent int, err error) {
+	if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtext('sessions:' || current_tenant()::text || ':' || $1))`, act.agent); err != nil {
+		return 0, 0, err
+	}
+	err = tx.QueryRow(ctx, `SELECT count(*), count(*) FILTER (WHERE created_at > now() - interval '1 hour')
+		FROM sessions WHERE agent_id = $1 AND created_by = $2`, act.agent, "app:"+act.app).Scan(&all, &recent)
+	return all, recent, err
+}
+
+// capNewSessions refuses a session registered since appSessions counted
+// before (so a new one, made by this transaction), once the app started
+// more than MaxNewSessionsPerHour sessions for the agent in the last hour,
+// this one included; the transaction rolls back, so it isn't made.
+func capNewSessions(ctx context.Context, tx pgx.Tx, act actor, before int) error {
+	all, recent, err := appSessions(ctx, tx, act)
+	if err != nil {
+		return err
+	}
+	if all > before && recent > MaxNewSessionsPerHour {
+		slog.Warn("appapi: an app's new sessions for an agent past the hourly cap", "app", act.app, "tenant", act.tenant, "sessions", recent)
+		return errTooManySessions
+	}
+	return nil
 }
 
 // listSessions lists the agent's sessions, with presence.
@@ -319,6 +368,9 @@ func (a *API) respond(w http.ResponseWriter, v any, err error) {
 		httpx.WriteError(w, http.StatusForbidden, "other_client", "that session key (call.session) is a conversation in another MCP client; call again without it")
 	case errors.Is(err, errNoConversation):
 		httpx.WriteError(w, http.StatusBadRequest, "unknown_conversation", "nothing identifies this conversation: pass call.session (the handle a subscribe result gave it)")
+	case errors.Is(err, errTooManySessions):
+		httpx.WriteError(w, http.StatusTooManyRequests, "session_rate_limited",
+			fmt.Sprintf("at most %d new sessions an hour for one agent: resume one (session) or reuse a label instead", MaxNewSessionsPerHour))
 	case errors.As(err, &limit):
 		httpx.WriteError(w, http.StatusForbidden, "workspace_limit", limit.Message(a.SupportEmail))
 	case apps.IsWorkspaceRate(err):

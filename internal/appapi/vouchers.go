@@ -64,9 +64,8 @@ const FeatureSubscribeVouchers = "subscribe_vouchers"
 const (
 	voucherPrefix = "wsv_"
 	// VoucherTTL is how long an unused voucher can be redeemed: four hours.
-	// A probe of ChatGPT measured 9 to 16 seconds when the person asks at
-	// once, and 62 minutes for one who came back later, past the first
-	// hour.
+	// A person who asks at once redeems it within seconds, but one who
+	// comes back later can take more than an hour.
 	VoucherTTL = 4 * time.Hour
 	// Unused vouchers at once: per verified user of an app, and anonymous
 	// ones per app, in separate pools (anonymous farming can't starve
@@ -231,9 +230,16 @@ func (a *API) voucherLine(ctx context.Context, app apps.App, call callIn, user s
 	}
 	var session *string
 	if appUserID == nil {
-		if s := transportSession(call); s != "" {
-			session = &s
+		s := transportSession(call)
+		if s == "" {
+			// Anonymous, without a transport session: bound to nothing, the
+			// voucher would be a bearer token for whoever reads it (it's in
+			// the conversation's text), so none is handed out, and the
+			// caller gets the result it gets without vouchers.
+			logNo(vrNoSession)
+			return ""
 		}
+		session = &s
 	}
 	token := newVoucher()
 	capped := ""
@@ -395,7 +401,7 @@ func voucherBinding(v *voucherRow, et apps.EventType, sub apps.Subscription, cal
 }
 
 // voucherSubscribe is events/subscribe with a voucher (eventsubs.go hands
-// it over): the checks in the design's order, then a claim, the callback's
+// it over): the checks in order, then a claim, the callback's
 // verification, and the subscription's creation (or, with a used voucher,
 // the refresh of the subscription it made).
 func (a *API) voucherSubscribe(w http.ResponseWriter, r *http.Request, in eventsIn) {
@@ -462,6 +468,15 @@ func (a *API) voucherSubscribe(w http.ResponseWriter, r *http.Request, in events
 	}
 	if reason := voucherBinding(v, et, sub, in.Call); reason != "" {
 		a.refuseVoucher(ctx, w, app, in.Name, reason)
+		return
+	}
+	// Anonymous, bound to no transport session (handed out before those
+	// stopped being handed out): a bearer token, refused as push refuses
+	// it, for a redemption and a refresh alike. Its holder may not be the
+	// caller it was handed to. A subscription one made isn't renewed, so
+	// it lapses at its ttl.
+	if v.AppUser == nil && v.Session == nil {
+		a.refuseVoucher(ctx, w, app, in.Name, vrNoSession)
 		return
 	}
 	// 6. Used: a refresh of the subscription it made, or nothing.

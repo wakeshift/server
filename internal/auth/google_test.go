@@ -211,8 +211,8 @@ func TestDevSignInOnlyOnLocalhost(t *testing.T) {
 		"http://localhost:8370":   true,
 		"http://127.0.0.1:9":      true,
 		"https://localhost:8443":  true,
-		"https://wakeshift.dev":   false,
-		"http://wakeshift.dev":    false,
+		"https://example.test":    false,
+		"http://example.test":     false,
 		"http://localhost.evil.x": false,
 	} {
 		mux := http.NewServeMux()

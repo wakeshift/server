@@ -2,7 +2,7 @@
 // shows: a row of agents (tiers 1 and 2), "More agents" for the rest, and
 // for the one chosen, how to add the app, what to say, and whether it's woken
 // while idle and what to install or approve. agents.json is generated from
-// internal/harnesses (`make agent-picker`); picker.ts is the same renderer for
+// internal/harnesses; picker.ts is the same renderer for
 // the TypeScript apps.
 //
 // A page includes the stylesheet and script (Paths, served by Handler under

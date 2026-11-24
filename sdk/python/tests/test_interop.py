@@ -189,7 +189,8 @@ def test_one_native_client_rule() -> None:
 
 
 def test_client_table_is_the_shared_one() -> None:
-    # The generated constants are mcp-events-clients.json (make mcp-events-clients),
+    # The generated constants are mcp-events-clients.json (regenerated in Wakeshift's
+    # server repository by go run ./internal/mcpevents/clientsgen/gen),
     # without its documentation (_about, reason, source, about) and webhook_only (only
     # Wakeshift reads it), which the SDKs don't ship.
     def strip(v: Any) -> Any:

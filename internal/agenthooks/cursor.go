@@ -1,7 +1,8 @@
 package agenthooks
 
 // Cursor Automations webhooks: how a Grok Bot is woken.
-// A routine with a webhook trigger, created by the agent inside its bot,
+// Grok Bot runs in Cursor's cloud, and its routines are Cursor Automations:
+// a routine with a webhook trigger, created by the agent inside its bot,
 // starts a run in that bot each time its webhook is POSTed to, even while
 // the bot is idle. The agent can't see the webhook's URL or key; the user
 // pastes both on a one-time page (SetupLinks), and the webhook is bound
@@ -35,7 +36,7 @@ const (
 )
 
 // cursorIDRE is a webhook's ID: a plain URL-safe charset and a sane length
-// (open question 1 in the design: to narrow to the real format).
+// (Cursor doesn't document the format, so this stays broad).
 var cursorIDRE = regexp.MustCompile(`^[A-Za-z0-9_-]{8,128}$`)
 
 // Dead reasons of a Cursor destination.

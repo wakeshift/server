@@ -45,7 +45,7 @@ func agyPostStep(t *testing.T, conv, tool string, res *mcp.CallToolResult) strin
 }
 
 // Antigravity's model sees a result's beacon (its hooks can't take it out)
-// and can repeat it to the user, as a staging run's did. The result tells
+// and can repeat it to the user, as one did in testing. The result tells
 // it not to, just before the beacon. An echoed beacon is no use to anyone
 // else: Ada's hook redeemed it in PostToolUse, before the model saw it, so
 // it's refused for her conversation and any other; a hook that sees it

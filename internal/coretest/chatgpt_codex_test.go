@@ -15,8 +15,8 @@ import (
 	"github.com/wakeshift/server/pkg/wakeshift"
 )
 
-// chatgptCodexMeta is a tools/call _meta as ChatGPT's Codex mode sends it (the
-// probes of November 9-10, 2026: keys only, made-up values), with its
+// chatgptCodexMeta is a tools/call _meta as ChatGPT's Codex mode sends it (as
+// observed: keys only, made-up values), with its
 // capabilities.
 func chatgptCodexMeta(session string) map[string]any {
 	return map[string]any{
@@ -240,8 +240,8 @@ func TestChatGPTCodexForeground(t *testing.T) {
 }
 
 // A Codex thread calling the app through ChatGPT's hosted connector
-// (Codex Desktop's codex_apps server, mcp__codex_apps__<app>_watch: the
-// owner's staging test of November 10, 2026) passes the mark of
+// (Codex Desktop's codex_apps server, mcp__codex_apps__<app>_watch, as
+// observed) passes the mark of
 // Wakeshift's Codex plugin, but its call is ChatGPT's (client "openai-mcp
 // (Codex)", the desktop app's capabilities, no x-codex-turn-metadata), and
 // the plugin's hook can't connect it from there. Its result never says the
@@ -373,8 +373,7 @@ func TestWrappedToolChatGPTDesktopAndWeb(t *testing.T) {
 	if list, err := w.app.EventSubscriptions(ctx, "wes"); err != nil || len(list) != 0 {
 		t.Fatalf("a Work chat was subscribed through the tool: %+v %v", list, err)
 	}
-	// The desktop app's regular chat (the probe of November 10, 2026,
-	// 07:09:57): the classic client, which can't subscribe natively and has
+	// The desktop app's regular chat (observed): the classic client, which can't subscribe natively and has
 	// no shell. It's told plainly it can't be woken: no MCP Events line, no
 	// command.
 	regular := map[string]any{"openai/session": "v1/chat-r", "openai/userAgent": "Codex Desktop/26.1103.60933 (Mac OS; arm64)",
@@ -391,7 +390,7 @@ func TestWrappedToolChatGPTDesktopAndWeb(t *testing.T) {
 }
 
 // The capabilities ChatGPT's desktop app and a Work chat on the web sent
-// on tools/call (the probes of November 9-10, 2026).
+// on tools/call, as observed.
 const (
 	desktopCaps = `{"experimental":{"openai/visibility":{"enabled":true}},"elicitation":{"form":{},"url":{}},"extensions":{"io.modelcontextprotocol/ui":{"mimeTypes":["text/html;profile=mcp-app","text/html+skybridge"]},"openai/elicitation":{"form":{},"userVerification":{}},"openai/form":{}}}`
 	webCaps     = `{"experimental":{"openai/visibility":{"enabled":true}},"extensions":{"io.modelcontextprotocol/ui":{"mimeTypes":["text/html;profile=mcp-app"]},"openai/elicitation":{"userVerification":{}}}}`

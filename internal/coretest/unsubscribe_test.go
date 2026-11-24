@@ -21,7 +21,7 @@ import (
 // Unsubscribing ends the conversation's command (its link is revoked) and
 // its presence at once, with no grace: subscribing again right after gives
 // a command to start (not "already running"), and that command gets the
-// next emit. The bench's S7: Claude Code was told its Monitor was already
+// next emit. In testing, Claude Code was told its Monitor was already
 // running, retried the revoked link, and stopped.
 func TestWatchAgainAfterUnwatchRearms(t *testing.T) {
 	c := coretest.Start(t)

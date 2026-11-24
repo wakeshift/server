@@ -400,8 +400,7 @@ export const SUBSCRIBING_TOOLS = new Set(["watch_build", "subscribe_events"]);
  * me in every session", rewritten here in the app so it runs against the
  * real marketplace of a hosted core. "v1": that answer is the user's approval of
  * the command, so the agent says in the same turn which option they chose
- * and what it runs, then runs it (it made agents ask less often than
- * without it, so it doesn't ship). Unset: the core's text as it is.
+ * and what it runs, then runs it. Unset: the core's text as it is.
  * Other texts are unchanged.
  */
 export const PLUGIN_ASK_ARMS = ["v1"] as const;
@@ -476,11 +475,9 @@ export function appFramed(added: string, build: number | null, app = "Shipyard")
  * description): Claude Code's offer rewritten so that nothing runs before
  * the user picks how to be notified: a listener for this session (the
  * Monitor, nothing installed), Wakeshift's plugin for every session (its
- * command and what it changes, in the option), or nothing. It answers what
- * Claude objected to in the transcripts ("you didn't ask for it", "an
- * external URL", "it would edit your settings"): the user is asked, the
- * service is named as the app's, and the install is one choice of three.
- * Other texts are unchanged. A prototype of what the core could write.
+ * command and what it changes, in the option), or nothing: the user is
+ * asked, the service is named as the app's, and the install is one choice
+ * of three. Other texts are unchanged.
  */
 export function askThree(added: string, build: number | null, app = "Shipyard", plain = false, necessity: boolean | "status" = false): string {
   const cmd = /`(claude plugin (?:install|marketplace add) [^`]+)`/.exec(added)?.[1];
@@ -633,7 +630,7 @@ export function seedBuilds(run: string, lane: string, now: number): Build[] {
 }
 
 function buildUrl(number: number): string {
-  return `https://shipyard.dev/acme/web/builds/${number}`;
+  return `https://shipyard.example/acme/web/builds/${number}`;
 }
 
 function running(number: number, pipeline: string, branch: string, commit: string, message: string, author: string, started: string, by: Build["started_by"]): Build {

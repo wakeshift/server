@@ -147,7 +147,7 @@ export abstract class ContainerDriver extends TmuxDriver implements Driver {
   async check(): Promise<Availability> {
     const img = await ensureImage(this.spec.image);
     if (!img.ok) return img;
-    if (!harnessState(this.spec.state.name)) return { ok: false, reason: `no bench state for ${this.name} in ${stateRoot()}: run make bench-state` };
+    if (!harnessState(this.spec.state.name)) return { ok: false, reason: `no bench state for ${this.name} in ${stateRoot()}: run bench/state.sh` };
     const s = readSecrets(this.spec.secrets);
     if (!s.ok) return { ok: false, reason: s.reason };
     // No version yet: the harness's own comes from the running container (versionIn).
@@ -160,7 +160,7 @@ export abstract class ContainerDriver extends TmuxDriver implements Driver {
     mkdirSync(dir, { mode: 0o700 }); // fresh: throws if it exists
     l.state.containerDir = dir; // removed by cleanup, whatever fails below
     const src = harnessState(this.spec.state.name);
-    if (!src) throw new BlockedError(`no bench state for ${this.name} in ${stateRoot()}: run make bench-state`);
+    if (!src) throw new BlockedError(`no bench state for ${this.name} in ${stateRoot()}: run bench/state.sh`);
     const secrets = readSecrets(this.spec.secrets);
     if (!secrets.ok) throw new BlockedError(secrets.reason);
     // A copy per run, so runs don't accumulate history. Timestamps kept: a

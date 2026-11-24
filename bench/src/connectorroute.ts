@@ -3,25 +3,21 @@
  * added as a claude.ai connector, through Anthropic's MCP proxy. The bench
  * can't add a real claude.ai connector (that's the user's claude.ai
  * account), so a proxy in front of the app's MCP URL does to each call
- * what that route did on November 9, 2026 (the Claude desktop app's Code
- * tab, a watch through a claude.ai connector), as far as the app and the
- * core can tell:
+ * what we observed that route do, as far as the app and the core can tell:
  *
- * - the client states Anthropic's name, "claude-ai" (initialize's
- *   clientInfo, and 2026-07-28's per-request clientInfo in _meta), with
- *   Anthropic's own User-Agent;
+ * - the client states the name "claude-ai" (initialize's clientInfo, and
+ *   2026-07-28's per-request clientInfo in _meta), with its own User-Agent;
  * - a request's _meta keeps only the protocol's own keys (and a
  *   progressToken): Claude Code's claudecode/toolUseId doesn't arrive, so
  *   nothing a beacon could be bound to does;
- * - a result's _meta keeps only the protocol's own keys (the transcript's
- *   mcpMeta held the server's serverInfo alone).
+ * - a result's _meta keeps only the protocol's own keys.
  *
  * Everything else passes through as it is.
  */
 import { createServer, request as httpRequest, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import type { AddressInfo } from "node:net";
 
-/** The client name Anthropic's servers state (harnesses.ConnectorProxyClients). */
+/** The client name the route states (harnesses.ConnectorProxyClients). */
 export const CONNECTOR_CLIENT = "claude-ai";
 
 /** The protocol's own _meta keys, which the route keeps. */

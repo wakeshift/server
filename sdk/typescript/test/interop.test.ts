@@ -158,7 +158,7 @@ test("interop: the generated client table is mcp-events-clients.json", () => {
   // Without its documentation (_about, reason, source, about) and webhook_only (only Wakeshift reads it), which the SDKs don't ship.
   const doc = (k: string) => k.startsWith("_") || k === "reason" || k === "source" || k === "about" || k === "webhook_only";
   const want = JSON.parse(readFileSync(new URL("../../test/mcp-events-clients.json", import.meta.url), "utf8"), (k, v) => (doc(k) ? undefined : v));
-  assert.deepEqual(CLIENT_TABLE, want, "run make mcp-events-clients");
+  assert.deepEqual(CLIENT_TABLE, want, "regenerate it: go run ./internal/mcpevents/clientsgen/gen");
 });
 
 test("interop: x-mcp-header annotations are checked when an event is defined (mcp_param_schema)", () => {

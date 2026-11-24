@@ -1,17 +1,23 @@
 .PHONY: build web db test test-go lint run gate bench-test bench-dry-run image clean
 
 # The build's version: when it was built (UTC) and from which commit, e.g.
-# 2026.11.25.1435+91faaf7. The connectors send theirs, and the server
+# 2026.11.20.1435+91faaf7. The connectors send theirs, and the server
 # reports its own (internal/version).
 VERSION ?= $(shell date -u +%Y.%m.%d.%H%M)+$(shell git describe --always --dirty 2>/dev/null || echo dev)
 VERSION := $(VERSION)
 LDFLAGS := -ldflags="-s -w -X github.com/wakeshift/server/internal/version.Version=$(VERSION)"
 
-# Postgres from docker-compose.yml (on 127.0.0.1:5439): the server's
-# database, owned by an ordinary role, and the superuser the tests make a
-# database each with.
-DEV_DATABASE_URL ?= postgres://wakeshift:wakeshift@localhost:5439/wakeshift?sslmode=disable
-TEST_DATABASE_URL ?= postgres://postgres:postgres@localhost:5439/postgres?sslmode=disable
+# Postgres from docker-compose.yml (on 127.0.0.1, port WAKESHIFT_DB_PORT,
+# default 5439): the server's database, with its two ordinary roles
+# (deploy/postgres-init.sql), the owner that migrates it and the server's,
+# which only reads and writes, and the superuser the tests make a database
+# each with. If port 5439 is taken, pick another, as in
+# `WAKESHIFT_DB_PORT=5440 make run`; docker compose reads it too.
+WAKESHIFT_DB_PORT ?= 5439
+export WAKESHIFT_DB_PORT
+DEV_DATABASE_URL ?= postgres://wakeshift_server:wakeshift_server@localhost:$(WAKESHIFT_DB_PORT)/wakeshift?sslmode=disable
+DEV_MIGRATE_DATABASE_URL ?= postgres://wakeshift:wakeshift@localhost:$(WAKESHIFT_DB_PORT)/wakeshift?sslmode=disable
+TEST_DATABASE_URL ?= postgres://postgres:postgres@localhost:$(WAKESHIFT_DB_PORT)/postgres?sslmode=disable
 
 # `make run`: the server on this machine's loopback, with the console's
 # email-only sign-in (WAKESHIFT_DEV_SIGN_IN) and the published development
@@ -20,7 +26,7 @@ TEST_DATABASE_URL ?= postgres://postgres:postgres@localhost:5439/postgres?sslmod
 # for (or set WAKESHIFT_DEV_SIGN_IN_TOKEN). Development only; never use
 # these settings anywhere else. WAKESHIFT_APPS registers your apps (go run
 # ./cmd/appkey -app <id>).
-DEV_ENV = DATABASE_URL="$(DEV_DATABASE_URL)" WAKESHIFT_ADDR=127.0.0.1:8370 WAKESHIFT_PUBLIC_URL=http://localhost:8370 \
+DEV_ENV = DATABASE_URL="$(DEV_DATABASE_URL)" WAKESHIFT_MIGRATE_DATABASE_URL="$(DEV_MIGRATE_DATABASE_URL)" WAKESHIFT_ADDR=127.0.0.1:8370 WAKESHIFT_PUBLIC_URL=http://localhost:8370 \
 	WAKESHIFT_SECRET_KEY=dev-secret-key-at-least-32-bytes-long WAKESHIFT_DEV_SIGN_IN=1 WAKESHIFT_MCP_EVENTS_PUSH=1 \
 	WAKESHIFT_LOG_FORMAT=text WAKESHIFT_APPS='$(WAKESHIFT_APPS)'
 

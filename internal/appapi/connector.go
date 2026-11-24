@@ -262,7 +262,7 @@ func (a *API) redeemTicket(w http.ResponseWriter, r *http.Request, in redeemRequ
 		// (supersede leaves another app's alone). Left watching, it kept
 		// the conversation (this redeem was refused) and every publish
 		// reached it twice: once through the hooks on the old link, once
-		// through the new session's Monitor (wakebench S15, October 31).
+		// through the new session's Monitor.
 		oldTenant, oldLink = heldTenant, heldLink
 	}
 	var elsewhere linkedIn
@@ -479,6 +479,24 @@ func (a *API) redeemTicket(w http.ResponseWriter, r *http.Request, in redeemRequ
 			foldFrom = s
 			return sp.Commit(ctx)
 		}
+		// A first redeem: the session that has the conversation now, if
+		// another does, takes its redeems' lock here, before anything below
+		// takes the agent's sessions lock (supersede, the bind): redeem
+		// locks before the agent's, the one order (lockAgentSessions). This
+		// read only picks the lock: what's decided below reads the
+		// conversation's session again, under the agent's lock (which every
+		// bind takes), and goes ahead only if it's this one.
+		holder := ""
+		if s.Conversation == "" {
+			if o, err := sessions.ByConversation(ctx, tx, s.Agent, in.Thread); err == nil && o.ID != s.ID {
+				if err := streams.LockRedeems(ctx, tx, o.ID); err != nil {
+					return err
+				}
+				holder = o.ID
+			} else if err != nil && !errors.Is(err, sessions.ErrNotFound) {
+				return err
+			}
+		}
 		if oldTenant == tenant && oldLink != "" && s.Watching && (s.Conversation == "" || s.Conversation == in.Thread) {
 			// The earlier session is in this workspace (the app's user's):
 			// ended first, it gives the conversation up to this one.
@@ -488,9 +506,10 @@ func (a *API) redeemTicket(w http.ResponseWriter, r *http.Request, in redeemRequ
 		}
 		switch {
 		case s.Conversation == "":
-			// First redeem: the conversation is the hook's. Binds of the
-			// agent's sessions here wait for each other (its hooks may
-			// redeem two of them at once).
+			// First redeem: the conversation is the hook's (the redeem lock
+			// of the session that has it, if one does, was taken above).
+			// Binds of the agent's sessions here wait for each other (its
+			// hooks may redeem two of them at once).
 			if err := lockAgentSessions(ctx, tx, s.Agent); err != nil {
 				return err
 			}
@@ -516,6 +535,39 @@ func (a *API) redeemTicket(w http.ResponseWriter, r *http.Request, in redeemRequ
 			}
 			if err != nil {
 				return err
+			}
+			// Merging connects o, so it needs what a redeem of o's own
+			// ticket needs (#1152): while hooks hold a link to o, only they
+			// connect it, showing that link (or the call's key). A beacon
+			// for a sibling session, which anyone who had the app mint one
+			// naming the conversation holds, doesn't show that. (Hooks that
+			// send o's link have already ended o into this session:
+			// supersede, above.)
+			//
+			// o is read under the agent's lock, so it's current. If it
+			// isn't the session whose redeem lock was taken above (another
+			// redeem bound it in between), nothing here proved anything
+			// about it, and taking its lock now could deadlock: refused, as
+			// not shown (its hooks' next redeem shows its link).
+			if o.ID != holder {
+				notHeld = true
+				return refuse(errTaken)
+			}
+			var callKey []byte
+			if byCall != nil {
+				callKey = byCall.key
+			}
+			ocommand, err := claimedBearer(ctx, tx, tenant, o)
+			if err != nil {
+				return err
+			}
+			proven, err := redeemProven(ctx, tx, o, in.Thread, heldTenant == tenant, heldLink, callKey, ocommand)
+			if err != nil {
+				return err
+			}
+			if !proven.ok {
+				notHeld, listening = true, proven.listening
+				return refuse(errTaken)
 			}
 			if err := mergeInto(ctx, tx, app, s, o.ID); err != nil {
 				return err
@@ -622,8 +674,15 @@ func (a *API) redeemTicket(w http.ResponseWriter, r *http.Request, in redeemRequ
 	if err == nil && !fold && oldLink != "" && oldTenant != tenant {
 		// In another workspace (a conversation's own, without a user): its
 		// own transaction, after this one. Failing leaves it as it was,
-		// which the redeem doesn't depend on.
+		// which the redeem doesn't depend on. Only a conversation's own
+		// workspace of the same app: the link shown may be revoked or
+		// expired (streams.Held), which the takeover check above doesn't
+		// count, so a user's workspace (another user's, say: their old
+		// link from a log) is never ended from here.
 		if serr := a.DB.InTenant(r.Context(), oldTenant, func(tx pgx.Tx) error {
+			if ok, err := conversationWorkspaceOf(r.Context(), tx, oldTenant, app); err != nil || !ok {
+				return err
+			}
 			return supersede(r.Context(), tx, app, oldLink, "", in.Thread)
 		}); serr != nil {
 			slog.Warn("appapi: ending a superseded session", "err", serr)
@@ -921,10 +980,30 @@ func supersede(ctx context.Context, tx pgx.Tx, app, link, current, thread string
 	return mergeInto(ctx, tx, app, s, current)
 }
 
+// conversationWorkspaceOf: tenant is a conversation's own workspace (no
+// user: "~conversation:…") of app.
+func conversationWorkspaceOf(ctx context.Context, tx pgx.Tx, tenant, app string) (bool, error) {
+	var owner, external string
+	err := tx.QueryRow(ctx, `SELECT coalesce(app_id, ''), coalesce(external_id, '') FROM tenants WHERE id = $1::uuid`, tenant).Scan(&owner, &external)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return false, nil
+	}
+	return err == nil && owner == app && strings.HasPrefix(external, conversationPrefix), err
+}
+
 // lockAgentSessions serializes, in the transaction's workspace, what binds
 // or merges agent's sessions (as sessions.Register numbers them): two
 // redeems of one conversation's sibling sessions at once (its hooks run
 // in parallel) each see what the other did.
+//
+// Lock order: a transaction takes any session's redeem lock
+// (streams.LockRedeems: redeemProven, the command check and a first
+// redeem's holder, all in redeemTicket) before this one, never after: once
+// it holds this lock it takes no redeem lock it doesn't already hold. A
+// first redeem holds at most two redeem locks (its own session's, for a
+// command, then the conversation's session's), and the conversation's
+// session is never a first redeem's own, so those can't cycle either.
+// streams takes a redeem lock without this one.
 func lockAgentSessions(ctx context.Context, tx pgx.Tx, agent string) error {
 	_, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtext('sessions:' || current_tenant()::text || ':' || $1))`, agent)
 	return err

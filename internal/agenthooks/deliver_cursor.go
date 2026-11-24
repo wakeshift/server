@@ -21,7 +21,7 @@ import (
 // least Spacing between POSTs, each carrying everything waiting (up to
 // BatchEvents and BatchBytes), at most PerHour and PerDay POSTs; past a
 // cap, messages wait for the next window. Zero fields take the defaults
-// (the design's recommendations; WAKESHIFT_GROK_* settings).
+// (WAKESHIFT_GROK_* settings).
 type CursorPacing struct {
 	Spacing     time.Duration // default 20s
 	PerHour     int           // default 60
@@ -299,7 +299,7 @@ func (d *Deliverer) sendCursor(ctx context.Context, c claimed) (finished bool) {
 		slog.Info("agent webhooks: join announced", "tenant", c.tenant, "session", c.session, "status", sent.Status)
 		return true
 	case answer == CursorAccepted:
-		// Metrics (monitoring.tf: cursor_deliveries, cursor_delivery_age):
+		// Metrics (cursor_deliveries, cursor_delivery_age):
 		// age_ms is the oldest event's publish to Cursor's 200.
 		var age int64
 		if t := sentList[0].Event.OccurredAt; !t.IsZero() {

@@ -13,6 +13,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"runtime"
+	"slices"
 	"strings"
 	"testing"
 
@@ -72,7 +73,7 @@ func fakeHermes(t *testing.T, log string, exit int) string {
 	return p
 }
 
-// A partner's installer can tell what happened from the exit code alone,
+// A third-party installer can tell what happened from the exit code alone,
 // and nothing is written on the failures that say "nothing changed".
 func TestHermesInstallExitCodes(t *testing.T) {
 	script, _ := hermesScriptFor(t)
@@ -274,6 +275,99 @@ func TestHermesInstallAsRoot(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(hh, "plugins")); !os.IsNotExist(err) {
 		t.Fatal("wrote something")
+	}
+}
+
+// As root, a plugin an earlier run left root's is handed to the Hermes
+// home's owner, who controls that home, so nothing there is followed: the
+// chown runs inside the plugin's own directory, on what's directly in it
+// (never a link or a file with another hard link) and the directory last,
+// and not at all if plugins/ or the plugin's directory is a link, or the
+// directory is its owner's already. Here a stand-in stat says the home
+// belongs to "nobody" and a stand-in chown records where it ran and on
+// what.
+func TestHermesInstallAsRootChownFollowsNothing(t *testing.T) {
+	script, _ := hermesScriptFor(t)
+	if os.Getuid() == 0 {
+		t.Skip("needs a home that isn't root's")
+	}
+	if exec.Command("id", "nobody").Run() != nil {
+		t.Skip("no user nobody here")
+	}
+	fakes := t.TempDir()
+	os.WriteFile(filepath.Join(fakes, "id"), []byte("#!/bin/sh\nif [ \"$*\" = -u ]; then echo 0; exit 0; fi\nexec /usr/bin/id \"$@\"\n"), 0o755)
+	os.WriteFile(filepath.Join(fakes, "setpriv"), []byte("#!/bin/sh\nwhile [ $# -gt 0 ]; do case \"$1\" in --*) shift ;; *) break ;; esac; done\nexec \"$@\"\n"), 0o755)
+	os.WriteFile(filepath.Join(fakes, "stat"), []byte("#!/bin/sh\necho nobody\n"), 0o755)
+	chowned := filepath.Join(t.TempDir(), "chowned")
+	os.WriteFile(filepath.Join(fakes, "chown"), []byte("#!/bin/sh\necho \"$(pwd -P) $*\" >> \""+chowned+"\"\n"), 0o755)
+	logf := filepath.Join(t.TempDir(), "ran")
+	ok := fakeHermes(t, logf, 0)
+	// plugin lays out a plugin an earlier root run left, with a link, a
+	// file with another hard link and a folder in it.
+	plugin := func(dir string) {
+		t.Helper()
+		if err := os.MkdirAll(filepath.Join(dir, "sub"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		os.WriteFile(filepath.Join(dir, "__init__.py"), []byte("# "+hermes.Marker+"\n"), 0o644)
+		os.WriteFile(filepath.Join(dir, "config.json"), []byte(`{"issuers": []}`), 0o644)
+		outside := filepath.Join(t.TempDir(), "someone-elses")
+		os.WriteFile(outside, []byte("x"), 0o644)
+		os.Symlink(outside, filepath.Join(dir, "link"))
+		if err := os.Link(outside, filepath.Join(dir, "hard")); err != nil {
+			t.Fatal(err)
+		}
+	}
+	run := func(hh string) string {
+		t.Helper()
+		os.Remove(chowned)
+		_, errs, code := runScript(t, script, []string{"PATH=" + fakes + ":/usr/bin:/bin", "HOME=" + t.TempDir(), "HERMES_HOME=" + hh, "HERMES_BIN=" + ok})
+		if code != 0 {
+			t.Fatalf("%d %s", code, errs)
+		}
+		b, _ := os.ReadFile(chowned)
+		return string(b)
+	}
+
+	// The plugin's directory, in the Hermes home: handed over from inside
+	// it, the directory last.
+	hh := t.TempDir()
+	plugin(filepath.Join(hh, "plugins", "wakeshift"))
+	real, _ := filepath.EvalSymlinks(filepath.Join(hh, "plugins", "wakeshift"))
+	got := strings.Fields(run(hh))
+	if len(got) < 5 || got[0] != real || got[1] != "-h" || !strings.HasPrefix(got[2], "nobody:") || got[len(got)-1] != "." {
+		t.Fatalf("chown: %q", got)
+	}
+	names := got[3:]
+	for _, want := range []string{"./__init__.py", "./config.json", "./sub", "."} {
+		if !slices.Contains(names, want) {
+			t.Errorf("didn't chown %s: %q", want, names)
+		}
+	}
+	for _, not := range []string{"./link", "./hard"} {
+		if slices.Contains(names, not) {
+			t.Errorf("chowned %s: %q", not, names)
+		}
+	}
+
+	// plugins/ is a link (to another plugin with the marker, outside the
+	// Hermes home): nothing is chowned.
+	hh = t.TempDir()
+	elsewhere := t.TempDir()
+	plugin(filepath.Join(elsewhere, "wakeshift"))
+	os.Symlink(elsewhere, filepath.Join(hh, "plugins"))
+	if got := run(hh); got != "" {
+		t.Fatalf("plugins/ a link: chowned %q", got)
+	}
+
+	// The plugin's directory is a link: nothing is chowned.
+	hh = t.TempDir()
+	elsewhere = t.TempDir()
+	plugin(filepath.Join(elsewhere, "wakeshift"))
+	os.MkdirAll(filepath.Join(hh, "plugins"), 0o755)
+	os.Symlink(filepath.Join(elsewhere, "wakeshift"), filepath.Join(hh, "plugins", "wakeshift"))
+	if got := run(hh); got != "" {
+		t.Fatalf("the plugin's directory a link: chowned %q", got)
 	}
 }
 

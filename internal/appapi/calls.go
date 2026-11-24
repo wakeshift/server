@@ -160,8 +160,7 @@ const (
 // notesLast puts a call's notes (onceNote, staleNote) after the block's
 // text, before its beacon trailer if it has one (which stays last): what
 // the agent should do comes first. Codex quoted a block that opened with
-// onceNote as if that line were all of it, and asked nothing (vendor
-// bench, November 6, 2026).
+// onceNote as if that line were all of it, and asked nothing.
 func notesLast(text string, notes ...string) string {
 	n := join(notes...)
 	if n == "" {
@@ -329,8 +328,8 @@ type nativeLine struct {
 // how opencode subscribes, which the generic line doesn't. Without it, a
 // model read "subscribe to it (MCP Events)" as done by the app's own tool
 // and told the user it was watching, with nothing that would wake it. Even
-// with the tool named, one run in five still did, so the note says this
-// call didn't subscribe.
+// with the tool named, some runs still did, so the note says this call
+// didn't subscribe.
 //
 // opencode 2.4.0 has no watch_mcp_event tool: an event watch is an
 // automation (automation.create with a trigger of type "event"), whose
@@ -339,7 +338,7 @@ type nativeLine struct {
 // (2.4.0's User-Agent, "opencode/latest/2.4.0/cli", isn't a product/version
 // token, and the SDKs don't pass clientInfo.version). With the old note,
 // 2.4.0's models looked for watch_mcp_event, failed, and found
-// automation.create themselves (wakebench push lane, 2026-11-23). The note
+// automation.create themselves. The note
 // says nothing about the session key: the voucher in the arguments is
 // what the subscription needs.
 const opencodeWatchNote = `In opencode, that's automation.create with an event trigger ({"type": "event", "server": this MCP server's name, "event": the event's name, "args": those arguments}) and an action for when it fires; before opencode 2.4, the watch_mcp_event tool, with the same server, event and arguments. This tool call didn't subscribe you: nothing wakes this conversation until you subscribe there.`

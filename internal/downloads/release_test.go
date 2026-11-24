@@ -165,7 +165,7 @@ func TestReleaseScriptRefusesTampering(t *testing.T) {
 }
 
 // Hermes's script from the release exits with HermesExitVerify (7) when the
-// plugin at the origin was swapped, as partners' installers read it, and
+// plugin at the origin was swapped, as a third-party installer reads it, and
 // writes nothing; the genuine plugin installs.
 func TestReleaseHermesRefusesTampering(t *testing.T) {
 	dir, origin, _ := release(t)

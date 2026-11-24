@@ -276,7 +276,7 @@ test("a bridged caller never gets a voucher line: call.subscribe subscribes its 
   assert.equal(a.calls.find((q) => q.path === "/calls/addition")?.body.native, undefined);
 });
 
-test("a native-only call whose addition fails returns the vendor's result unchanged and logs native_unavailable (§7.2)", async () => {
+test("a native-only call whose addition fails returns the vendor's result unchanged and logs native_unavailable", async () => {
   const a = app({ core: { "/calls/addition": () => ({ status: 500, json: { error: { code: "internal", message: "try again" } } }) } });
   const server = new McpServer({ name: "x", version: "1" });
   const attached = a.wake.attach(server);

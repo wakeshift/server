@@ -1110,7 +1110,7 @@ test("nativeOf: a harness Wakeshift wakes itself is never native, whatever it de
 });
 
 test("nativeOf: ChatGPT's desktop app isn't native; a Work chat on the web is", () => {
-  // The capabilities each sent on tools/call (the probes of November 9-10, 2026).
+  // The capabilities each sent on tools/call, as observed.
   const desktopCaps = { experimental: { "openai/visibility": { enabled: true } }, elicitation: { form: {}, url: {} }, extensions: { "io.modelcontextprotocol/ui": { mimeTypes: ["text/html;profile=mcp-app", "text/html+skybridge"] }, "openai/elicitation": { form: {}, userVerification: {} }, "openai/form": {} } };
   const webCaps = { experimental: { "openai/visibility": { enabled: true } }, extensions: { "io.modelcontextprotocol/ui": { mimeTypes: ["text/html;profile=mcp-app"] }, "openai/elicitation": { userVerification: {} } } };
   const call = (client: string, ua: string, meta: Record<string, unknown>) => ({
@@ -1128,7 +1128,7 @@ test("nativeOf: ChatGPT's desktop app isn't native; a Work chat on the web is", 
     call("openai-mcp (Codex)", "openai-mcp/1.0.0 (Codex)", { "openai/session": "chat-1", sessionId: "s-1", windowId: "s-1:0", [caps]: c, ...extra });
   assert.deepEqual(nativeOf(codex(desktopCaps) as any, {}), { native: false, conversation: null }, "the desktop app (Codex mode)");
   assert.deepEqual(nativeOf(codex(webCaps, { traceparent: "00-x" }) as any, {}), { native: true, conversation: "chat-1" }, "a Work chat on the web");
-  // The desktop app's regular chat (the probe of November 10, 2026, 07:09:57).
+  // The desktop app's regular chat, as observed.
   const regular = call("openai-mcp", "openai-mcp/1.0.0", {
     "openai/session": "chat-r",
     "openai/userAgent": "Codex Desktop/26.1103.60933 (Mac OS; arm64)",

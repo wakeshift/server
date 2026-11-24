@@ -1,7 +1,6 @@
 package appapi
 
-// MCP wait tasks: Claude Code's no-install wake path (docs/harnesses.md,
-// "Claude Code: MCP tasks as a wake path"). For a client that takes MCP
+// MCP wait tasks: Claude Code's no-install wake path. For a client that takes MCP
 // tasks (protocol 2026-07-28 with the tasks extension), an app's SDK lists
 // Wakeshift's wait tool (harnesses.WaitTool) and passes its calls, and the
 // client's tasks/get and tasks/cancel for the task it answers with, here:
@@ -73,6 +72,15 @@ const (
 	// taskWorking is a working task's status message.
 	taskWorking = "Waiting for Wakeshift messages."
 )
+
+// ConversationTaskMaxAge is how long a wait task's ID works in a
+// conversation's own workspace (no user), where nothing but the ID says
+// the caller is the conversation (tasks/get carries no session key): a
+// day, not waittask.MaxAge, so an ID read from a transcript doesn't
+// collect the conversation's messages for a month. Past it, the task
+// fails as an expired one does, and the conversation calls the wait tool
+// again (with its session key).
+const ConversationTaskMaxAge = 24 * time.Hour
 
 // errUnknownTask: the ID isn't a task of this caller's (forged, another
 // app's, workspace's, client's or conversation's, or malformed).
@@ -380,6 +388,11 @@ func (a *API) openFor(ctx context.Context, app apps.App, in taskCall) (openTask,
 	o := openTask{id: in.Task, task: t, holder: a.Tasks.Holder(in.Task), mode: modeTopic}
 	if err := a.callerOf(ctx, app, in, &o); err != nil {
 		return o, err
+	}
+	// In a conversation's own workspace (no user) nothing but the ID says
+	// who's asking, so it works for ConversationTaskMaxAge, not MaxAge.
+	if o.conv && o.mode == modeTopic && a.now().Sub(t.Issued) > ConversationTaskMaxAge {
+		expired = true
 	}
 	if expired {
 		// Said only to the conversation the task was for: its session's

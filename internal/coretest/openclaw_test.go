@@ -171,8 +171,7 @@ func redeemFor(t *testing.T, cl beacon.Claims, thread, supersedes string) (int, 
 // session. When the plugin connects the same OpenClaw conversation to it,
 // handing back the link it held, the two become one (in a user's
 // workspace the earlier merges into the new one; in conversation
-// workspaces the new one folds into the earlier, docs/harnesses.md
-// "Parallel first calls"), and the link handed back ends: one OpenClaw
+// workspaces the new one folds into the earlier), and the link handed back ends: one OpenClaw
 // conversation stays one subscription, and nothing waits on a session no
 // one reads. A link for another conversation, or one Wakeshift didn't
 // sign, ends nothing.

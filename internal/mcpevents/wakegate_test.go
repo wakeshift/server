@@ -44,8 +44,8 @@ func TestWakeSkipsWorkspacesWithoutWebhooks(t *testing.T) {
 func TestWakeSendsToANewWebhook(t *testing.T) {
 	ctx := context.Background()
 	d := dbtest.New(t)
-	AllowLoopback = true
-	t.Cleanup(func() { AllowLoopback = false })
+	SetAllowLoopback(true)
+	t.Cleanup(func() { SetAllowLoopback(false) })
 	hits := make(chan string, 4)
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { hits <- r.URL.Path }))
 	t.Cleanup(srv.Close)

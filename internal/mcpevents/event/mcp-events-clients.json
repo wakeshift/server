@@ -35,7 +35,7 @@
       "dialect": "chatgpt",
       "webhook_only": true,
       "reason": "ChatGPT's desktop app, in Codex mode (openai-mcp (Codex) with the openai/form and text/html+skybridge capabilities) or a regular chat (openai-mcp with _meta openai/userAgent 'Codex Desktop/...'): it can't subscribe, so it keeps subscribe_events",
-      "source": "#1128; docs/harnesses.md 'ChatGPT's Codex mode'"
+      "source": "#1128; docs/harnesses.md"
     },
     {
       "id": "chatgpt-session",
@@ -70,8 +70,8 @@
       "native": "undeclared",
       "dialect": "openclaw",
       "webhook_only": true,
-      "reason": "OpenClaw's mcp-events plugin reads only top-level events and never declares; it refuses a webhook-id other than eventId, any gap or terminated envelope, and a body without cursor. This is the events plugin's name, not OpenClaw's tool-calling client (openclaw-bundle-mcp, bridged): if OpenClaw's tool calls ever sent openclaw, they would turn native and get vouchers nothing redeems, so the live interop matrix asserts the name its tool calls send",
-      "source": "OpenClaw 2026.11.3 docs/automation/mcp-events.md; interop rerun 2026-11-11"
+      "reason": "OpenClaw's mcp-events plugin reads only top-level events and never declares; it refuses a webhook-id other than eventId, any gap or terminated envelope, and a body without cursor. This is the events plugin's name, not OpenClaw's tool-calling client (openclaw-bundle-mcp, bridged): if OpenClaw's tool calls ever sent openclaw, they would turn native and get vouchers nothing redeems, so the interop tests assert the name its tool calls send",
+      "source": "OpenClaw 2026.11.3 docs/automation/mcp-events.md; interop tests"
     },
     {
       "id": "opencode",
@@ -98,7 +98,7 @@
       "dialect": "spec",
       "webhook_only": true,
       "reason": "Hermes Agent, bridged like the harnesses below (Wakeshift's plugin wakes it), in an entry of its own because it takes events by webhook alone: an unreachable callback's hint never suggests poll or push to it",
-      "source": "docs/harnesses.md; live interop matrix 2026-11-12"
+      "source": "docs/harnesses.md; interop tests"
     },
     {
       "id": "bridged",
@@ -115,7 +115,7 @@
       "dialect": "spec",
       "webhook_only": true,
       "reason": "Hermes Agent by User-Agent product, as Hermes by name",
-      "source": "docs/harnesses.md; live interop matrix 2026-11-12"
+      "source": "docs/harnesses.md; interop tests"
     },
     {
       "id": "bridged-ua",
@@ -131,7 +131,7 @@
       "native": "capabilities",
       "dialect": "draft",
       "reason": "The Vercel AI SDK's default client name; its webhook receiver refuses a webhook-id other than eventId",
-      "source": "@ai-sdk/mcp 2.0.97; interop rerun 2026-11-11"
+      "source": "@ai-sdk/mcp 2.0.97; interop tests"
     },
     {
       "id": "ai-sdk-ua",
@@ -139,7 +139,7 @@
       "native": "capabilities",
       "dialect": "draft",
       "reason": "The Vercel AI SDK by User-Agent (ai-sdk/<version>), which a renamed client still sends",
-      "source": "@ai-sdk/mcp 2.0.97; interop rerun 2026-11-11"
+      "source": "@ai-sdk/mcp 2.0.97; interop tests"
     },
     {
       "id": "tanstack",
@@ -147,7 +147,7 @@
       "native": "capabilities",
       "dialect": "draft",
       "reason": "TanStack AI's default client name; it declares the extension but refuses a webhook-id other than eventId",
-      "source": "@tanstack/ai-mcp 1.2.0; interop rerun 2026-11-11"
+      "source": "@tanstack/ai-mcp 1.2.0; interop tests"
     }
   ]
 }

@@ -673,8 +673,8 @@ func TestDataMigrationPatternSeesEveryTenant(t *testing.T) {
 // every idle open transaction (db.IdleInTransactionTimeout) and every lock
 // wait (db.LockTimeout), and check for a vanished client
 // (db.ClientCheckInterval), as connection parameters: an ALTER ROLE
-// setting is lost when the role is made again, and production once ran a
-// statement for 25 hours. The pool's connections and those outside it
+// setting is lost when the role is made again, and an unbounded statement
+// can run for hours. The pool's connections and those outside it
 // (Conn: the listeners) alike; those outside it also end once idle for
 // db.HeldIdleTimeout, and the pool pings a connection before handing it
 // out, briefly.

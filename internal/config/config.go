@@ -86,7 +86,18 @@ import (
 //	                      callback URL is $WAKESHIFT_PUBLIC_URL/auth/github/callback
 //	WAKESHIFT_ALLOWED_SIGNUPS  comma-separated emails and @domains who may
 //	                      create an account whatever the sign-up cap (existing
-//	                      users can always sign in)
+//	                      users can always sign in). On a self-hosted server
+//	                      (not Wakeshift's hosted service, by
+//	                      WAKESHIFT_PUBLIC_URL as for the Terms) only these
+//	                      make accounts, unless WAKESHIFT_OPEN_SIGNUPS=1
+//	WAKESHIFT_OPEN_SIGNUPS  "1" opens a self-hosted server's sign-up as the
+//	                      hosted service's is: anyone while there are fewer
+//	                      accounts than the cap (signup_cap), invite codes
+//	                      and organization invites past it, and the allow
+//	                      list always. Unset, sign-up is closed: only the
+//	                      allow list (and people the operator invites off
+//	                      the waitlist) get accounts; everyone else waits
+//	                      on the waitlist
 //	WAKESHIFT_INVITES_PER_USER  how many people each user can invite (default 5)
 //	WAKESHIFT_APPS        JSON list of apps to register: [{"id", "name", "mcp_url"
 //	                      (optional), "public_key" (base64 Ed25519)}]: our own,
@@ -94,7 +105,8 @@ import (
 //	                      console)
 //	WAKESHIFT_CONNECTOR_DIR  the connector for Codex, built per platform
 //	                      (served at /download/codex/*; optional,
-//	                      set in the image; make connector builds one)
+//	                      set in the image; go build ./cmd/wakeshift-connector
+//	                      builds one)
 //	WAKESHIFT_INSTALLER_URL  where install commands fetch the /install
 //	                      scripts instead of this server: a release of the
 //	                      installers built for this Wakeshift, e.g.
@@ -128,9 +140,12 @@ import (
 //	                      offers run (npx -y @wakeshift/connect@<version>
 //	                      cursor) in place of Wakeshift's installer
 //	WAKESHIFT_MAX_STREAMS  the most streams and long polls one instance holds
-//	                      at once (default 0: no cap); past it, new ones get
-//	                      503 with Retry-After. Set it under the platform's
-//	                      per-instance request limit (Cloud Run's concurrency).
+//	                      at once (default DefaultMaxStreams, 900; 0: no
+//	                      cap); past it, new ones get 503 with Retry-After,
+//	                      and one app's links take at most part of it
+//	                      (streams.AppShare). Set it under the platform's
+//	                      per-instance request limit (Cloud Run's concurrency)
+//	                      and the process's open-file limit.
 //	WAKESHIFT_DEV_SIGN_IN  "1" allows signing in with just an email and the
 //	                      development sign-in token, only when
 //	                      WAKESHIFT_PUBLIC_URL is a localhost URL and
@@ -181,9 +196,8 @@ import (
 //	                      (ChatGPT) subscribe vouchers for tools-only events,
 //	                      "0" doesn't. Unset:
 //	                      on when WAKESHIFT_PUBLIC_URL is a localhost URL
-//	                      (development), off otherwise. Staging and
-//	                      production set "1" (production since v1.4.32).
-//	                      Off, every request carrying a voucher is refused
+//	                      (development), off otherwise. Wakeshift's hosted
+//	                      service sets "1". Off, every request carrying a voucher is refused
 //	                      and none is handed out.
 //	WAKESHIFT_MCP_EVENTS_PUSH  "1" serves MCP Events push (events/stream):
 //	                      POST
@@ -207,15 +221,21 @@ import (
 //	WAKESHIFT_GROK_BATCH_EVENTS, WAKESHIFT_GROK_BATCH_BYTES  the most events
 //	                      and bytes in one POST (default 20 and 32768)
 //	WAKESHIFT_GROK_RATE_LIMITS  "1" turns on the request limits on Grok
-//	                      Bot's setup and proof routes (per address, per link,
+//	                      Bot's setup page's routes (per address, per link,
 //	                      per user), "0" or unset
 //	                      leaves them off until there's data. Off, no client
 //	                      address is read, and WAKESHIFT_PROXY_HOPS isn't
-//	                      needed for them.
+//	                      needed for them. On, WAKESHIFT_PROXY_HOPS must be
+//	                      set, to the right number: too few and every client
+//	                      counts as a proxy's address, so one client's failed
+//	                      checks lock everyone out; too many and clients pick
+//	                      their own address with X-Forwarded-For, escaping
+//	                      the limits.
 //	WAKESHIFT_PROXY_HOPS  how many trusted proxies are in front, each
 //	                      appending to X-Forwarded-For, for limits per
 //	                      client address (behind Google's load balancer: 2;
-//	                      default 0, the connection's address)
+//	                      default 0, the connection's address; required, 0
+//	                      included, with WAKESHIFT_GROK_RATE_LIMITS on)
 type Config struct {
 	Addr        string
 	DatabaseURL string
@@ -239,7 +259,11 @@ type Config struct {
 	GitHubClientID     string
 	GitHubClientSecret string
 	AllowedSignups     string
-	InvitesPerUser     int
+	// OpenSignups (WAKESHIFT_OPEN_SIGNUPS=1) opens a self-hosted server's
+	// sign-up to the cap, invite codes and organization invites; without
+	// it only the allow list makes accounts (SignupsClosed).
+	OpenSignups    bool
+	InvitesPerUser int
 	// Organization invite email (Resend): the key or its secret, and From.
 	ResendKey, ResendKeySecret, MailFrom string
 	DevSignIn                            bool
@@ -277,12 +301,11 @@ type Config struct {
 	// SubscribeVouchers hands native clients subscribe vouchers.
 	SubscribeVouchers bool
 	// RedeemByToolCall lets Claude Code's hooks redeem a call's ticket by
-	// the tool call's ID (docs/harnesses.md, "Redeem by call"; off by default).
+	// the tool call's ID (off by default).
 	RedeemByToolCall bool
 	// InlineSessionSteps gives Claude Code's install offer the session-only
-	// steps inline, as before November 2026, instead of a one-time URL
-	// fetched once the user picks that option (docs/harnesses.md,
-	// "Session-only setup, sent when it's picked"). Inline unless
+	// steps inline, as before, instead of a one-time URL fetched once the
+	// user picks that option. Inline unless
 	// WAKESHIFT_CLAUDE_SESSION_STEPS=deferred: an environment turns the
 	// new offer on in its own configuration, so a release
 	// never turns it on by itself.
@@ -313,6 +336,12 @@ type GrokSettings struct {
 	RateLimits bool
 }
 
+// DefaultMaxStreams is WAKESHIFT_MAX_STREAMS when it isn't set: what the
+// hosted service runs with, so a server nobody sized
+// still refuses streams (503, Retry-After) before it runs out of memory or
+// file descriptors, and one app's share (streams.AppShare) means something.
+const DefaultMaxStreams = 900
+
 // FromEnv reads the configuration from the environment.
 func FromEnv() (Config, error) {
 	c := Config{
@@ -330,6 +359,7 @@ func FromEnv() (Config, error) {
 		GitHubClientID:      os.Getenv("WAKESHIFT_GITHUB_CLIENT_ID"),
 		GitHubClientSecret:  os.Getenv("WAKESHIFT_GITHUB_CLIENT_SECRET"),
 		AllowedSignups:      os.Getenv("WAKESHIFT_ALLOWED_SIGNUPS"),
+		OpenSignups:         os.Getenv("WAKESHIFT_OPEN_SIGNUPS") == "1",
 		DevSignIn:           os.Getenv("WAKESHIFT_DEV_SIGN_IN") == "1",
 		ConnectorDir:        os.Getenv("WAKESHIFT_CONNECTOR_DIR"),
 		InstallerURL:        os.Getenv("WAKESHIFT_INSTALLER_URL"),
@@ -474,7 +504,14 @@ func FromEnv() (Config, error) {
 			return c, errors.New("WAKESHIFT_PROXY_HOPS must be a number of proxies (0 or more)")
 		}
 		c.ProxyHops = n
+	} else if c.Grok.RateLimits {
+		// The default (0, the connection's address) behind a proxy would
+		// count every client as the proxy, and one client's failed checks
+		// would lock everyone out: the operator says how many there are.
+		return c, errors.New("WAKESHIFT_GROK_RATE_LIMITS=1 needs WAKESHIFT_PROXY_HOPS: the number of trusted proxies in front that append to X-Forwarded-For " +
+			"(0 if clients connect directly, 2 behind Google's load balancer)")
 	}
+	c.MaxStreams = DefaultMaxStreams
 	if v := os.Getenv("WAKESHIFT_MAX_STREAMS"); v != "" {
 		n, err := strconv.Atoi(v)
 		if err != nil || n < 0 {
@@ -567,6 +604,19 @@ func FromEnv() (Config, error) {
 	}
 	return c, nil
 }
+
+// Hosted says whether this is Wakeshift's hosted service (production or
+// staging), by its public URL, as for its Terms (hostedSites).
+func (c Config) Hosted() bool {
+	_, ok := hostedSites[c.PublicURL]
+	return ok
+}
+
+// SignupsClosed says whether only the allow list makes new accounts:
+// on a self-hosted server, unless WAKESHIFT_OPEN_SIGNUPS=1. The hosted
+// service keeps its sign-up cap, invites and allow list
+// (docs/self-hosting.md, "Who can sign up").
+func (c Config) SignupsClosed() bool { return !c.Hosted() && !c.OpenSignups }
 
 // hostedSites are Wakeshift's hosted service's consoles (production's and
 // staging's, no other host) and the sites whose Terms and Privacy Policy

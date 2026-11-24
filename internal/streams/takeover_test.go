@@ -16,7 +16,7 @@ import (
 // startGhostWait starts a wait through a front end and kills its client:
 // the server can't tell (the front end hasn't written to the client since),
 // so the wait goes on holding the stream, as a killed Monitor's or
-// background command's did behind Google's front end.
+// background command's can behind a load balancer.
 func (f *fixture) startGhostWait(t *testing.T, base, link, id, query string) {
 	t.Helper()
 	fe := frontEnd(t, base)
@@ -80,9 +80,8 @@ func TestHooksTakeOverFromADeadWait(t *testing.T) {
 	}
 }
 
-// The bench's S4 on staging: the Monitor's curl was killed behind the
-// front end, so its wait went on holding the stream, and a new Monitor
-// started. The new wait takes over at once (the newest wins, as with
+// A Monitor's curl killed behind the front end: its wait went on holding
+// the stream, and a new Monitor started. The new wait takes over at once (the newest wins, as with
 // connections): the dead one ends "replaced", nothing waits out its
 // timeout and grace, and what the dead one took but its client never
 // confirmed comes to the new one at once, marked as a redelivery.

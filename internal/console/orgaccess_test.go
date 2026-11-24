@@ -92,14 +92,18 @@ func TestDeveloperRoutesByRole(t *testing.T) {
 			return `{"org_id": "` + org + `", "id": "by-` + role + `", "name": "By ` + role + `"}`
 		}, all},
 		{"POST", "/api/v1/developer/apps/register", func(role string) string {
-			return `{"org_id": "` + org + `", "id": "cli-by-` + role + `", "name": "CLI by ` + role + `", "public_key": "` + newCLIKey(t).link() + `"}`
+			k := newCLIKey(t)
+			return `{"org_id": "` + org + `", "id": "cli-by-` + role + `", "name": "CLI by ` + role + `", "public_key": "` + k.link() + `", "key_code": "` + k.code() + `"}`
 		}, all},
 		{"GET", p, nil, all},
 		{"PATCH", p, func(role string) string { return `{"name": "Renamed by ` + role + `"}` }, admin},
 		{"GET", p + "/keys", nil, all},
 		{"POST", p + "/keys", func(role string) string { return `{"name": "` + role + `"}` }, all},
 		// Named as the keys the next rows revoke before each try.
-		{"POST", p + "/keys/register", func(role string) string { return `{"name": "to try", "public_key": "` + newCLIKey(t).link() + `"}` }, all},
+		{"POST", p + "/keys/register", func(role string) string {
+			k := newCLIKey(t)
+			return `{"name": "to try", "public_key": "` + k.link() + `", "key_code": "` + k.code() + `"}`
+		}, admin},
 		{"PATCH", p + "/keys/{key}", func(role string) string { return `{"name": "renamed by ` + role + `"}` }, all},
 		{"POST", p + "/keys/{key}/rotate", nil, all},
 		{"POST", p + "/keys/{key}/revoke", nil, all},

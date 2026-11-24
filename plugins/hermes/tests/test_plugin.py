@@ -994,7 +994,7 @@ class SessionKeys(unittest.TestCase):
         self.assertEqual(self.p.session_key_for("sess-1", "mcp__chat__unwatch"), "")
 
     def test_the_redeems_key_without_a_user(self):
-        # An app with no user (like the bench's realistic apps): the
+        # An app with no user (like a CI app with no sign-in): the
         # key names the conversation's own workspace, and its one session's
         # handle (<agent>@conversation) doesn't carry it, so no line in the
         # result can be matched to the redeem's session. The redeem's
@@ -1682,7 +1682,7 @@ class UpdateCommand(unittest.TestCase):
             self.assertEqual(self.cmd(raw=raw), plugin.REINSTALL_COMMAND, raw)
 
     def test_no_private_hermes_imports(self):
-        # Hermes's catalog rule 9: public plugin surfaces only.
+        # Hermes's plugin catalog: plugins use its public plugin surfaces only.
         src = (Path(plugin.__file__)).read_text()
         self.assertNotIn("plugins_cmd", src)
 

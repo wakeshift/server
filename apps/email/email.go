@@ -4,8 +4,8 @@
 // it. A Brand gives each sender its own name, logo and colors; an Email is
 // what one message says. Render escapes every string it's given.
 //
-// Wakeshift's logo is a PNG on the site (site/static/email), drawn from
-// logo/*.svg with `rsvg-convert -z 3`. Apps without an image logo get a
+// Wakeshift's logo is a PNG on wakeshift.ai (wakeshift.ai/static/email/).
+// Apps without an image logo get a
 // colored tile with a character in it, drawn in HTML.
 package email
 

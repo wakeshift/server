@@ -20,8 +20,9 @@ import (
 // waiter as a blocking hook: the turn would hang on it, and a waiter left
 // behind would take messages for a process that's gone. Nothing in the
 // hook's input or environment says which, so the hooks read Claude's own
-// command line, through CLAUDE_PID: Claude's own test, so the hooks can't
-// disagree with its choice of background or blocking.
+// command line, through CLAUDE_PID: the same signals Claude Code has been
+// observed to choose by, so the hooks agree with its choice of background
+// or blocking.
 //
 // An SDK host's session and a one-shot SDK query (a string prompt) start
 // Claude with the same command line, and only the first stays open between

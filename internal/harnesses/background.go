@@ -218,8 +218,8 @@ func linkPrefix(url string) string {
 // path rather than following it. Only a link it saved becomes b: if the
 // write fails, the next hub.next tries again (and the url in use is the new
 // one either way). No rm and no mktemp: Codex refuses a command holding
-// "rm -f" ("rm -f style commands are not permitted", ChatGPT's Codex mode,
-// November 11, 2026), so a write that fails leaves at most that one .new
+// "rm -f" ("rm -f style commands are not permitted", observed in ChatGPT's
+// Codex mode), so a write that fails leaves at most that one .new
 // file, which the next save overwrites (TestCommandsHaveNoRm).
 const linkSave = `[ "$m" = "$b" ] || { [ ! -L "$f.new" ] && (umask 077; printf '%s\n' "$m" > "$f.new") && mv -f "$f.new" "$f" && b=$m; }; `
 
@@ -272,11 +272,11 @@ func loopStartClaim(url string, c Claim, query, vars string) string {
 }
 
 // MonitorTimeout is the timeout_ms Claude Code's agent starts its Monitor
-// with: the most Claude Code allows. Claude Code 2.1.312 caps every Monitor
-// at 30 minutes (a larger timeout_ms is cut to that; there's no persistent
-// option, and timeout_ms defaults to 5 minutes), and when one expires it
-// tells the model only "Re-arm it if you still need the watch" (wakebench
-// S13, docs/harnesses.md).
+// with: the most Claude Code allows. Claude Code caps every Monitor at 30
+// minutes, as observed on 2.1.312 (a larger timeout_ms is cut to that;
+// there's no persistent option, and timeout_ms defaults to 5 minutes), and
+// when one expires it tells the model only "Re-arm it if you still need
+// the watch".
 const MonitorTimeout = "1800000"
 
 // MonitorRestart is how long Claude Code's Monitor loop runs before it ends
@@ -299,9 +299,8 @@ const MonitorWith = "(timeout_ms " + MonitorTimeout + ")"
 // MonitorRules says what the agent does when its Monitor's command ends:
 // after a hub.restart line (MonitorRestart) or when the Monitor expires or
 // stops, start it again without asking the user, since that's routine; a
-// hub.closed line's note says what to do. In the 2026-10-29 launch
-// rehearsal, told only "If it stops any other way, start it again", the
-// agent told the user it was no longer watching and asked whether to re-arm.
+// hub.closed line's note says what to do. In testing, told only "If it
+// stops any other way, start it again", the agent told the user it was no longer watching and asked whether to re-arm.
 const MonitorRules = `The command keeps going by itself. Every 25 minutes it ends with a {"type":"hub.restart"} line, since Claude Code stops a Monitor after 30 minutes: ` +
 	`then start the Monitor again the same way, without asking the user (it's routine, and nothing is missed). ` +
 	`When a {"type":"hub.closed"} line arrives, it has ended for good: do what its note says. ` +
@@ -421,7 +420,8 @@ var museCapNote = "Nothing arrived for " + strconv.Itoa(MuseCap/3600) + " hours,
 // Why not have the server confirm a link's last batch when the next wait
 // starts (no confirm in the command)? The server knows only that it
 // wrote the answer to the front end, not that the command read it: behind
-// Google's front end a killed curl kept a wait "held" for minutes, and
+// a load balancer's front end a killed curl can keep a wait "held" for
+// minutes, and
 // what was posted meanwhile went into it. A batch the next run confirmed
 // on that basis would be lost. The command confirms only what it printed.
 func MuseLoop(url string) string { return museLoop(url, MuseCap) }
@@ -479,11 +479,11 @@ const antigravityRun = "with run_command in the background (IsDaemon false, Wait
 // confirms nothing, and it cost every wake a model step before the reply:
 // agy's model writes the whole loop out again (several seconds),
 // and agy's own safety check reviews it with a second model (about 2s) for
-// its shell operators, all before the agent acts (wakebench, November 2,
-// 2026, agy 1.4.12: docs/harnesses.md). Messages that arrive in between
+// its shell operators, all before the agent acts (observed on agy
+// 1.4.12). Messages that arrive in between
 // wait, and the next run hands them over at once.
 //
-// In a step of its own (November 9, 2026): agy's model emitted its first
+// In a step of its own: in testing, agy's model emitted its first
 // action and the command in one step, and agy runs a step's calls only
 // once it's written, so the longer command (it reads its link from a
 // file) put report_seen seconds later after the publish than before;
@@ -510,7 +510,7 @@ const copilotTell = `Before you start it, tell the user in one sentence: Copilot
 // Acting first, as Antigravity's agent does (antigravityWoken): the loop
 // confirms what it printed before it exits, so running it again first only
 // delayed the answer by the model typing the whole command out again, the
-// longer once it read its link from a file (wakebench, November 9, 2026).
+// longer once it read its link from a file.
 // In a step of its own: told only to act first, Copilot's model still
 // typed the command out in the same step as its first action.
 const copilotWoken = `When Copilot tells you the shell finished, read its output with read_bash (shellId "` + CopilotShell + `"), act on the messages first, and only then, in a step of its own, run the same command again the same way (it's the same every time, and Copilot asks the user to approve it again; it has already confirmed the messages it printed, and ones that arrive in between come with the next run). `
@@ -587,15 +587,14 @@ func foregroundLoop(url string, secs int) string {
 // failed (curl's exit status), so that a shell without network access,
 // as Codex's sandbox is on a turn after the one the user allowed it in,
 // isn't taken for a quiet round and run again and again. One short
-// sentence: agents retype a command whose text they find long (retest 2,
-// November 11, 2026: the agent shortened only this note), and what to do
+// sentence: agents retype a command whose text they find long (in
+// testing, the agent shortened only this note), and what to do
 // about it is in the result's note (foregroundSandbox). No apostrophes:
 // it sits inside single quotes.
 const foregroundUnreachable = "Could not reach Wakeshift: nothing was missed."
 
 // foregroundSandbox is what ChatGPT's Codex mode is told about its sandbox
-// (Codex's workspace-write, network off; retested with ChatGPT
-// 26.1106.51428 and Codex 0.167.0-alpha.4.1): the link file
+// (Codex's workspace-write, network off, as observed): the link file
 // is outside the workspace, so it's written with apply_patch, which asks
 // the user once (a REPL or a shell write is refused); the command needs
 // network access, and ChatGPT's permission card offers only Deny or Allow
@@ -809,7 +808,7 @@ func backgroundUpgrade(h Harness, install string) string {
 	if h.ZeroInstall != Background || !h.Installable {
 		return ""
 	}
-	// A real question with the command in it (wakebench, November 2, 2026:
+	// A real question with the command in it (in testing,
 	// "Optional: … Say if you want the install command" had the user say
 	// yes to a question never asked, and the agent then doubted the command
 	// it had been given).
@@ -881,10 +880,10 @@ func LoopLinkStep(url string) string {
 // hub.restart).
 //
 // Each round has a time limit (LoopRoundMax), a little past the server's
-// round (streams.LoopRound): on staging a round's connection once hung
-// with no error after the server had written its message (behind the load
-// balancer, November 13, 2026), and curl with no limit waited for good
-// while the Monitor looked alive. Any failure but a refusal (a time limit,
+// round (streams.LoopRound): behind a load balancer, a round's connection
+// can hang with no error after the server has written its message, and
+// curl with no limit waits for good while the Monitor looks alive. Any
+// failure but a refusal (a time limit,
 // a connection reset, a front end's error) goes round again under a new
 // loop id after a pause: the server never takes a new loop's round as the
 // old one's confirmation, so what the failed round may not have printed
@@ -1120,7 +1119,7 @@ func updateChanges(h Harness, pluginRoute bool) string {
 // server pinned to the app and the tool the beacon names, and codex_apps is
 // one server for every ChatGPT app, with the connector's name in each
 // tool's. The same app added to Codex as an MCP server of its own reaches
-// the hook (docs/harnesses.md, "ChatGPT's Codex mode").
+// the hook.
 func CodexAppsNote(app string) string {
 	return "Wakeshift's Codex plugin is installed here, but it can't connect this thread through ChatGPT's app connector (the mcp__codex_apps__ tools), so nothing wakes you in the background from these tools. " +
 		"The user can add " + app + "'s MCP server to Codex directly (Codex's MCP server settings, or `codex mcp add`) and use its tools from there: the plugin can connect this thread from those, to wake it in the background. Tell the user this too."
@@ -1128,8 +1127,8 @@ func CodexAppsNote(app string) string {
 
 // ChatGPTDesktopChat reports whether a call is from a regular chat in
 // ChatGPT's desktop app (not Codex mode): ChatGPT's classic client name,
-// "openai-mcp", with _meta openai/userAgent starting "Codex Desktop/" (the
-// probe of November 10, 2026). It can't subscribe with MCP Events and has
+// "openai-mcp", with _meta openai/userAgent starting "Codex Desktop/"
+// (observed). It can't subscribe with MCP Events and has
 // no shell, so it's ChatGPT, told it can't be woken, and never offered a
 // native subscribe. The web's chats don't send that _meta. Observed, not a
 // published contract; every SDK ports it.
@@ -1150,7 +1149,7 @@ func ChatGPTNotNative(client string, meta map[string]any) bool {
 
 // ChatGPTDesktopClient is the client name ChatGPT's MCP client sends on
 // tools/call, from the desktop app (Codex mode) and from Work chats on
-// the web alike (the probes of November 5 and 9, 2026).
+// the web alike (observed).
 const ChatGPTDesktopClient = "openai-mcp (Codex)"
 
 // ChatGPTDesktop reports whether a call with this client name and _meta
@@ -1160,10 +1159,10 @@ const ChatGPTDesktopClient = "openai-mcp (Codex)"
 // their capabilities (_meta's io.modelcontextprotocol/clientCapabilities)
 // differ. The desktop app's declare both the UI extension's
 // "text/html+skybridge" mime type and the openai/form extension; the
-// web's declare neither (the probes of November 9-10, 2026). Both are
+// web's declare neither (observed). Both are
 // required: anything else, missing or malformed capabilities included, is
-// ChatGPT's. Observed, not a published contract (docs/harnesses.md,
-// "ChatGPT's Codex mode"); every SDK ports it, so a change is made in all.
+// ChatGPT's. Observed, not a published contract; every SDK ports it, so a
+// change is made in all.
 func ChatGPTDesktop(client string, meta map[string]any) bool {
 	if ClientName(client) != "openai-mcp (codex)" {
 		return false

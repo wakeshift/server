@@ -19,8 +19,8 @@ import (
 
 // A webhook's watermark (read by every subscribe and refresh) counts only
 // its own conversation's deliveries, and reads them by index: not through
-// the thousands the agent has to its other conversations, which piled up
-// over a month and made subscribing slow in production.
+// the thousands an agent can have to its other conversations, which would
+// make subscribing slow.
 func TestWatermarkReadsOnlyItsConversation(t *testing.T) {
 	d := dbtest.New(t)
 	ctx := context.Background()

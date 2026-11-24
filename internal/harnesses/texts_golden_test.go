@@ -129,8 +129,7 @@ func TestTextsGolden(t *testing.T) {
 }
 
 // No text an agent is given, and may relay, names an app by its internal
-// ID ("app/try"): apps are named by their display names (QA pass,
-// November 9, 2026).
+// ID ("app/try"): apps are named by their display names.
 func TestTextsNameNoAppIDs(t *testing.T) {
 	for k, v := range goldenTexts() {
 		if strings.Contains(v, "app/") {

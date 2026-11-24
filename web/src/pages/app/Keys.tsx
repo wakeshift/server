@@ -3,9 +3,10 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { createKey, listKeys, registerKey, renameKey, revokeKey, rotateKey, type AppKey, type NewKey, type OwnedApp } from '../../api/developer'
 import { Badge, Button, Card, Empty, ErrorText, Input, Loading, Meta, Notice, Row, Rows, Secret, when } from '../../components/ui'
 import { KeySDKNote } from '../../components/KeySDKNote'
-import { confirmError, Done, invalidLink, KeyCode, useCLILink, useKeyCode } from '../../components/CLIConfirm'
+import { codeMatches, confirmError, Done, invalidLink, TypeKeyCode, useCLILink, useKeyCode } from '../../components/CLIConfirm'
 import { forgetLink, type CLILink } from '../../lib/cliLink'
 import { ago, AppPage } from './common'
+import { can, roleLabel } from '../../api/orgs'
 
 export default function AppKeys() {
   return (
@@ -150,6 +151,7 @@ function Body({ app }: { app: OwnedApp }) {
                 ) : (
                   <>
                     <span className="font-medium">{k.name}</span> <code className="ml-1 text-xs text-ink-3">{k.key_id}</code>
+                    {k.via === 'cli_link' && <Badge>from a CLI link</Badge>}
                   </>
                 )}
                 <Meta>
@@ -182,14 +184,16 @@ function Body({ app }: { app: OwnedApp }) {
 }
 
 // ConfirmKey adds the key `wakeshift-cli keys new` made on the developer's
-// machine to the app, once the person has checked its code. The app's other
-// keys keep working.
+// machine to the app, once the person has typed its code from their
+// terminal. Owners and admins only: a link can be someone else's. The app's
+// other keys keep working.
 function ConfirmKey({ app, link, onAdded }: { app: OwnedApp; link: CLILink; onAdded: () => void }) {
   const key = useKeyCode(link.pk)
   const [name, setName] = useState('')
+  const [typed, setTyped] = useState('')
   const [added, setAdded] = useState<AppKey | null>(null)
   const add = useMutation({
-    mutationFn: () => registerKey(app.id, { public_key: link.pk, name }),
+    mutationFn: () => registerKey(app.id, { public_key: link.pk, name, key_code: typed.trim() }),
     onSuccess: (k) => {
       forgetLink()
       setAdded(k.key_info)
@@ -203,6 +207,13 @@ function ConfirmKey({ app, link, onAdded }: { app: OwnedApp; link: CLILink; onAd
   }
   if (app.deleted_at) {
     return <Notice tone="caution" title="This app is deleted">It can't get new keys. Run the command again for another app.</Notice>
+  }
+  if (!can.linkKey(app.role)) {
+    return (
+      <Notice tone="caution" title="Only owners and admins add a key from a link">
+        You're a {roleLabel[app.role].toLowerCase()} in this app's organization. Make a key below instead and put it in your .env as WAKESHIFT_KEY, or ask an owner or admin to open the link.
+      </Notice>
+    )
   }
   return (
     <Card title="Add the key from your terminal" className="border-accent/40">
@@ -219,10 +230,10 @@ function ConfirmKey({ app, link, onAdded }: { app: OwnedApp; link: CLILink; onAd
           <p className="text-sm leading-relaxed text-ink-2">
             Your terminal made a new key for {app.name}. The key stays on your machine; Wakeshift keeps only its public half.
           </p>
-          <KeyCode code={key.code} />
+          <TypeKeyCode value={typed} onChange={setTyped} code={key.code} />
           <Input label="Name (optional)" placeholder="Ada's laptop, CI…" value={name} maxLength={60} onChange={(e) => setName(e.target.value)} />
           <div>
-            <Button type="submit" disabled={!key.code || add.isPending}>
+            <Button type="submit" disabled={!codeMatches(typed, key.code) || add.isPending}>
               Add key
             </Button>
           </div>

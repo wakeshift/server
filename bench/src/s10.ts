@@ -4,7 +4,9 @@
 // written to the spec by its own authors rather than shaped to our server.
 //
 //   node dist/src/s10.js [--app ts-v2] [--results out.json] [--summary out.md]
-//   make bench-s10
+//
+// (in bench/, after npx tsc -p tsconfig.json, with WAKESHIFT_TEST_DATABASE_URL
+// set as for the Go tests)
 //
 // It starts a core with Go's TestSDKHarness, as conformance.ts does (or uses
 // WAKESHIFT_SDK_HARNESS's running one), and the toy app with its control API,

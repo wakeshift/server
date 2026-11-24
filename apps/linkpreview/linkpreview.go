@@ -4,7 +4,7 @@
 // link. Every URL in them is absolute, from the site's own configured URL,
 // so each environment advertises its own pages and images.
 //
-// A preview image is a 1200×630 PNG (internal/previewgen draws them).
+// A preview image is a 1200×630 PNG, drawn by the site's build.
 package linkpreview
 
 import (

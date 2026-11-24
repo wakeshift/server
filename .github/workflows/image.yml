@@ -2,22 +2,25 @@ name: Image
 
 # The container image, ghcr.io/wakeshift/server, for linux/amd64 and
 # linux/arm64, at each SemVer tag (v1.2.3, or v1.2.3-rc.1): tagged with the
-# version, and a release (no prerelease part) with latest too, with build
-# provenance and an SBOM attached, and signed keylessly with Sigstore
-# (cosign, through this workflow's GitHub OIDC identity). It pushes with
-# the workflow's own GITHUB_TOKEN: no stored secret.
+# version, with build provenance and an SBOM attached, and signed keylessly
+# with Sigstore (cosign, through this workflow's GitHub OIDC identity at the
+# tag). The highest release (no prerelease part) is tagged latest too. It
+# pushes with the workflow's own GITHUB_TOKEN: no stored secret. Check an
+# image against its own version's tag:
 #
-#   cosign verify ghcr.io/wakeshift/server:<version> \
-#     --certificate-identity-regexp '^https://github.com/wakeshift/server/\.github/workflows/image\.yml@refs/(tags/v|heads/main$)' \
+#   cosign verify ghcr.io/wakeshift/server:1.2.3 \
+#     --certificate-identity https://github.com/wakeshift/server/.github/workflows/image.yml@refs/tags/v1.2.3 \
 #     --certificate-oidc-issuer https://token.actions.githubusercontent.com
+#
+# Only a tag builds: the push of one, or a run by hand from one (Actions,
+# Run workflow, "Use workflow from" the tag), which builds that tag again
+# and never moves latest. The job runs in the release environment, which
+# the repository's settings protect (deployments from v* tags only, and a
+# required reviewer).
 on:
   push:
     tags: ['v*']
   workflow_dispatch:
-    inputs:
-      tag:
-        description: An existing version tag to build again (v1.2.3)
-        required: true
 
 permissions:
   contents: read
@@ -29,31 +32,66 @@ concurrency:
 jobs:
   image:
     name: Build, push and sign
+    if: github.ref_type == 'tag'
     runs-on: ubuntu-latest
     timeout-minutes: 30
+    environment: release
     permissions:
       contents: read
       packages: write # push to ghcr.io with GITHUB_TOKEN
       id-token: write # cosign's keyless signature
+    outputs:
+      latest: ${{ steps.commit.outputs.latest }}
     env:
       IMAGE: ghcr.io/${{ github.repository_owner }}/server
-      TAG: ${{ inputs.tag || github.ref_name }}
+      TAG: ${{ github.ref_name }}
+      # BuildKit, by digest (v0.35.1).
+      BUILDKIT: moby/buildkit:v0.35.1@sha256:baf6138eb8c37644800c7c913fba051e840ebb9ba13eaf92d92ef9a1712d0b4c
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          ref: ${{ env.TAG }}
-      # A SemVer version (v1.2.3, or v1.2.3-rc.1); only a release (no
-      # prerelease part) moves latest.
+      # A SemVer version tag (v1.2.3, or v1.2.3-rc.1), checked before
+      # anything is fetched; only a release (no prerelease part) may move
+      # latest.
       - name: Check the tag
         run: |
-          if ! printf '%s\n' "$TAG" | grep -Eqx 'v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-[0-9A-Za-z]+(\.[0-9A-Za-z]+)*)?'; then
-            echo "::error::$TAG isn't a version tag (v1.2.3 or v1.2.3-rc.1)"
+          if [ "$GITHUB_REF" != "refs/tags/$TAG" ] ||
+            ! printf '%s\n' "$TAG" | grep -Eqx 'v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-[0-9A-Za-z]+(\.[0-9A-Za-z]+)*)?'; then
+            echo "::error::$GITHUB_REF isn't a version tag (refs/tags/v1.2.3 or refs/tags/v1.2.3-rc.1)"
             exit 1
           fi
           case "$TAG" in
           *-*) echo "RELEASE=0" >>"$GITHUB_ENV" ;;
           *) echo "RELEASE=1" >>"$GITHUB_ENV" ;;
           esac
+      # The tag itself (refs/tags/, never a branch of the same name).
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: refs/tags/${{ env.TAG }}
+          persist-credentials: false
+      # What's built is the commit the tag names, and on a push the commit
+      # that was pushed (the tag hasn't moved since).
+      - name: Check the commit
+        id: commit
+        env:
+          EVENT: ${{ github.event_name }}
+        run: |
+          commit=$(git rev-parse --verify "refs/tags/$TAG^{commit}")
+          if [ "$(git rev-parse HEAD)" != "$commit" ]; then
+            echo "::error::checked out $(git rev-parse HEAD), but $TAG is $commit"
+            exit 1
+          fi
+          if [ "$EVENT" = push ] && [ "$GITHUB_SHA" != "$commit" ]; then
+            echo "::error::$TAG is $commit now, but the push was $GITHUB_SHA"
+            exit 1
+          fi
+          echo "COMMIT=$commit" >>"$GITHUB_ENV"
+          # latest: after a tag push of a release only (a run by hand
+          # rebuilds a version and leaves latest alone). The latest job
+          # decides where it goes.
+          if [ "$EVENT" = push ] && [ "$RELEASE" = 1 ]; then
+            echo "latest=1" >>"$GITHUB_OUTPUT"
+          else
+            echo "latest=0" >>"$GITHUB_OUTPUT"
+          fi
       - uses: sigstore/cosign-installer@756fe2d284c7292c4e9b62c8a28f1e5629c59532 # v4.1.3
       - name: Log in to ghcr.io
         env:
@@ -62,22 +100,67 @@ jobs:
       # The Dockerfile cross-compiles, so both platforms build natively.
       - name: Build and push
         run: |
-          tags=(--tag "$IMAGE:${TAG#v}")
-          if [ "$RELEASE" = 1 ]; then tags+=(--tag "$IMAGE:latest"); fi
-          docker buildx create --use --name multi
+          docker buildx create --use --name multi --driver-opt "image=$BUILDKIT"
           docker buildx build --platform linux/amd64,linux/arm64 \
             --build-arg VERSION="${TAG#v}" \
             --provenance=mode=max --sbom=true \
             --label org.opencontainers.image.source="https://github.com/${GITHUB_REPOSITORY}" \
-            --label org.opencontainers.image.revision="$(git rev-parse HEAD)" \
+            --label org.opencontainers.image.revision="$COMMIT" \
             --label org.opencontainers.image.version="${TAG#v}" \
             --label org.opencontainers.image.licenses=Apache-2.0 \
-            "${tags[@]}" \
+            --tag "$IMAGE:${TAG#v}" \
             --metadata-file "$RUNNER_TEMP/metadata.json" --push .
       - name: Sign
         run: |
           digest=$(python3 -c 'import json, sys; print(json.load(open(sys.argv[1]))["containerimage.digest"])' "$RUNNER_TEMP/metadata.json")
           cosign sign --yes "$IMAGE@$digest"
-          also=
-          if [ "$RELEASE" = 1 ]; then also=", latest"; fi
-          echo "Pushed and signed $IMAGE@$digest (${TAG#v}$also)" >>"$GITHUB_STEP_SUMMARY"
+          echo "Pushed and signed $IMAGE@$digest (${TAG#v}, $COMMIT)" >>"$GITHUB_STEP_SUMMARY"
+
+  # latest, after a release's image is pushed and signed: one run at a time
+  # across every tag (a global concurrency group), and always to the
+  # highest release whose image is pushed now, not to this run's own
+  # version unless it's that one. So runs for two versions, in any order,
+  # leave latest at the highest; one that's canceled while queued loses
+  # nothing, since the next sets the same. It moves latest only to an image
+  # whose signature verifies against that version's own tag.
+  latest:
+    name: Move latest
+    needs: image
+    if: needs.image.outputs.latest == '1'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    concurrency:
+      group: image-latest
+      cancel-in-progress: false
+    permissions:
+      contents: read
+      packages: write # retag on ghcr.io with GITHUB_TOKEN
+    env:
+      IMAGE: ghcr.io/${{ github.repository_owner }}/server
+    steps:
+      - uses: sigstore/cosign-installer@756fe2d284c7292c4e9b62c8a28f1e5629c59532 # v4.1.3
+      - name: Log in to ghcr.io
+        env:
+          TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: printf '%s' "$TOKEN" | docker login ghcr.io -u "$GITHUB_ACTOR" --password-stdin
+      - name: Move latest to the highest release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          # The release tags, highest first: latest goes to the first whose
+          # image is pushed (a higher one still building, or whose build
+          # failed, is skipped; its own run moves latest once it's pushed).
+          releases=$(gh api --paginate "repos/$GITHUB_REPOSITORY/git/matching-refs/tags/v" --jq '.[].ref' |
+            sed 's|^refs/tags/||' | { grep -Ex 'v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)' || true; } | sort -rV)
+          for release in $releases; do
+            if digest=$(docker buildx imagetools inspect "$IMAGE:${release#v}" --format '{{json .Manifest}}' | python3 -c 'import json, sys; print(json.load(sys.stdin)["digest"])'); then
+              cosign verify "$IMAGE@$digest" \
+                --certificate-identity "https://github.com/$GITHUB_REPOSITORY/.github/workflows/image.yml@refs/tags/$release" \
+                --certificate-oidc-issuer https://token.actions.githubusercontent.com >/dev/null
+              docker buildx imagetools create --tag "$IMAGE:latest" "$IMAGE@$digest"
+              echo "Tagged $IMAGE@$digest (${release#v}) latest" >>"$GITHUB_STEP_SUMMARY"
+              exit 0
+            fi
+            echo "$IMAGE:${release#v} isn't pushed: skipped" >>"$GITHUB_STEP_SUMMARY"
+          done
+          echo "No release image is pushed: left latest alone" >>"$GITHUB_STEP_SUMMARY"

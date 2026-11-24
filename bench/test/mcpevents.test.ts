@@ -93,7 +93,7 @@ test("collapse keeps the most severe status per check, and drops INFO", () => {
 });
 
 test("S10 runs on its own, not through bench/run", () => {
-  assert.throws(() => parseScenarios("S10"), /make bench-s10/);
+  assert.throws(() => parseScenarios("S10"), /node dist\/src\/s10\.js/);
   assert.ok(!parseScenarios("S1-S21").includes("S10" as never));
 });
 

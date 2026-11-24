@@ -7,8 +7,7 @@ import (
 
 // Codex's install offer as a client request: a form the app's SDK shows in
 // Codex's own dialog, so the user runs the install themselves and no model
-// step is needed (GPT-6.2 Sol, Codex's default since 0.169.1, never relays
-// the text offer). The SDK writes the message's first line itself
+// step is needed (Codex's default model doesn't relay the text offer). The SDK writes the message's first line itself
 // ("Wakeshift, for <app>:") and enforces fixed bounds on what's here: a
 // message of at most 1,200 characters and 20 lines, titles of at most 80,
 // one enum field of at most 4 options.

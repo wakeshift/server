@@ -611,8 +611,7 @@ func (a *API) appActivity(w http.ResponseWriter, r *http.Request) {
 	q := r.URL.Query()
 	topic, user, status := q.Get("topic"), q.Get("user"), q.Get("status")
 	if status == "cancelled" {
-		// Accepted for one release after "canceled" replaced it
-		// (AGENTS.md, Pending removals).
+		// Accepted for one release after "canceled" replaced it.
 		status = "canceled"
 	}
 	switch {

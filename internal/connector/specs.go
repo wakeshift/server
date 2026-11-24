@@ -233,7 +233,7 @@ func (s Spec) Uninstall(bin string, out io.Writer) error {
 	// logs), so nothing of it is left. It's this harness's alone, whichever
 	// apps and Wakeshifts it connected: the hooks it served are gone for all
 	// of them. A list of what to remove fell behind what hooks write there
-	// (S6 found it left on October 28), so the whole directory goes, and a
+	// (it once left files behind), so the whole directory goes, and a
 	// hook that still runs in an open session doesn't make it again
 	// (Settings.Installed).
 	if dir := set.Dir; ownDir(dir, s.Name) {

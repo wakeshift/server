@@ -132,7 +132,7 @@ type Sent struct {
 	Invite  Invite
 	Token   string
 	OrgName string
-	// From is who sent it: their name, else their email.
+	// From is who sent it: their email address.
 	From string
 }
 
@@ -188,10 +188,11 @@ func checkRate(ctx context.Context, tx pgx.Tx, org, email string) error {
 	return nil
 }
 
-// sender is who's sending, as the email names them, and the
-// organization's name.
+// sender is who's sending, as the email names them (their verified email
+// address, never their display name, which anyone can set to any text),
+// and the organization's name.
 func sender(ctx context.Context, tx pgx.Tx, user, org string) (from, orgName string, err error) {
-	err = tx.QueryRow(ctx, `SELECT coalesce(nullif(btrim(u.name), ''), u.email), o.name FROM users u, organizations o WHERE u.id = $1 AND o.id = $2`,
+	err = tx.QueryRow(ctx, `SELECT u.email, o.name FROM users u, organizations o WHERE u.id = $1 AND o.id = $2`,
 		user, org).Scan(&from, &orgName)
 	return from, orgName, err
 }

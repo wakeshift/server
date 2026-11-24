@@ -30,6 +30,8 @@ export interface AppKey {
   created_at: string
   last_used_at?: string
   revoked_at?: string
+  /** cli_link: registered from @wakeshift/cli's link. */
+  via?: 'cli_link'
 }
 
 // A new key: the key itself, shown once, and what's kept of it.
@@ -47,10 +49,11 @@ export const createOwnedApp = (n: { org_id?: string; id: string; name: string; m
   apiFetch<NewKey & { app: OwnedApp }>(base, { method: 'POST', json: n })
 // registerApp and registerKey register a key @wakeshift/cli made on the
 // developer's machine, by its public key (the links' pk): a new app with it
-// as its only key, or one more key for an app. Nothing secret comes back.
-export const registerApp = (n: { org_id?: string; id: string; name: string; public_key: string }) =>
+// as its only key, or one more key for an app (owners and admins). Nothing
+// secret comes back. key_code is what the person typed from their terminal.
+export const registerApp = (n: { org_id?: string; id: string; name: string; public_key: string; key_code: string }) =>
   apiFetch<{ app: OwnedApp; key_info: AppKey }>(`${base}/register`, { method: 'POST', json: n })
-export const registerKey = (id: string, k: { public_key: string; name: string }) =>
+export const registerKey = (id: string, k: { public_key: string; name: string; key_code: string }) =>
   apiFetch<{ key_info: AppKey }>(`${app(id)}/keys/register`, { method: 'POST', json: k })
 export const updateOwnedApp = (id: string, s: { name?: string; mcp_url?: string }) => apiFetch<OwnedApp>(app(id), { method: 'PATCH', json: s })
 export const deleteOwnedApp = (id: string) => apiFetch<{ deleted: boolean; grants_revoked: number }>(app(id), { method: 'DELETE' })

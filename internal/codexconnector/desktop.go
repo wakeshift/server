@@ -608,6 +608,10 @@ func (dc *desktopConn) viaBackground(ctx context.Context, batch []delivery, star
 	case errors.Is(err, errThreadInUse):
 		dc.expect(-1)
 		return unreachable, started, "another Codex process (the desktop app's, with no window answering for the thread) has it loaded"
+	case errors.Is(err, errApprovalRefused):
+		dc.cfg.Log.Warn("codex: this Codex refused the approval policy Wakeshift runs background turns with, so the turn didn't run; keeping its events to try again. Update Wakeshift's connector, or open the thread in the desktop app", "policy", backgroundApproval, "err", err)
+		dc.failed(len(batch))
+		return turnFailed, started, ""
 	case errors.Is(err, errTurnFailed):
 		dc.cfg.Log.Warn("codex: the background turn failed; keeping its events", "err", err)
 		dc.failed(len(batch))

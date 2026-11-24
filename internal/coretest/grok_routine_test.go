@@ -15,8 +15,8 @@ import (
 	"github.com/wakeshift/server/internal/coretest"
 )
 
-// A routine's run has its own CURSOR_CONVERSATION_ID, not the bot's (Grok
-// Bot on staging, November 8, 2026). The routine Wakeshift has the bot make
+// A routine's run has its own CURSOR_CONVERSATION_ID, not the bot's (as
+// observed in Grok Bot). The routine Wakeshift has the bot make
 // names the bot itself, so a strict run of it still answers the setup
 // challenge (with the key in the bot's folder, signed over the bot's ID)
 // and acts on a wake; it still refuses a body for another bot.
@@ -65,8 +65,8 @@ func TestGrokRoutineRunsHaveTheirOwnConversationID(t *testing.T) {
 	}
 }
 
-// A routine's run has no file-writing tool (Grok Bot on staging, November
-// 8, 2026): it answers the setup challenge with the routine's command
+// A routine's run has no file-writing tool (as observed in Grok Bot): it
+// answers the setup challenge with the routine's command
 // alone, and the webhook is bound.
 func TestGrokRoutineRunHasNoFileTool(t *testing.T) {
 	c := startGrok(t, nil)

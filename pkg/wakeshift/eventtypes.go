@@ -387,7 +387,7 @@ func jsNumbers(v any) any {
 	return v
 }
 
-// authorizeTimeout bounds Authorize and Identify (design §2.8, §2.9).
+// authorizeTimeout bounds Authorize and Identify.
 var authorizeTimeout = timeLimit
 
 // authorized runs t's Authorize for s and args: false if it refuses,

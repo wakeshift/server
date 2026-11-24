@@ -825,7 +825,7 @@ export interface AttachOptions<C = any> {
    */
   builtinTools?: BuiltinTools | false;
   /**
-   * House agents only: whether a call comes from a client that subscribes
+   * For the app's own first-party agents only: whether a call comes from a client that subscribes
    * to the app's events itself (MCP Events), for callers the SDK can't
    * recognize. false leaves it to the SDK's own checks.
    */

@@ -25,7 +25,7 @@ func startIdle(t *testing.T) *coretest.Core {
 // Only topics' conversations without a user expire: an app's users are
 // never forgotten by Wakeshift, however long unused, whatever their ID
 // looks like ("guest:…" was the SDKs' guest sign-in's, whose workspaces
-// were forgotten in October 2026: such an ID is now an ordinary user's).
+// have been forgotten: such an ID is now an ordinary user's).
 func TestIdleUsersAreKept(t *testing.T) {
 	c := startIdle(t)
 	app := headlessApp(t, c, "quiz", false)

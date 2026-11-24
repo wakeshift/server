@@ -399,9 +399,8 @@ func (c *conn) watchCodex(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case <-app.done:
-			// Codex's daemon can drop its clients and come back (on October
-			// 27 one did mid-game, with the window still open): reconnect
-			// while the thread is still there.
+			// Codex's daemon can drop its clients and come back, with the
+			// window still open: reconnect while the thread is still there.
 			next, err := c.redial(ctx)
 			if errors.Is(err, ErrThreadEnded) {
 				c.cancel(err)
@@ -427,9 +426,10 @@ func (c *conn) watchCodex(ctx context.Context) {
 			}
 			switch n.Method {
 			case "thread/status/changed":
-				// notLoaded isn't the end: on October 29 the TUI's resume
-				// after the daemon restarted went idle, notLoaded, idle in
-				// 20ms, and stopping there lost the rest of a conversation.
+				// notLoaded isn't the end: the TUI's resume after the
+				// daemon restarts can go idle, notLoaded, idle within
+				// milliseconds, and stopping there lost the rest of a
+				// conversation.
 				// Archive says notLoaded too, then thread/archived.
 				c.cfg.Log.Debug("codex: thread status", "status", p.Status.Type)
 				c.setStatus(p.Status.Type)
@@ -563,7 +563,7 @@ func (c *conn) windowOpen(ctx context.Context, closed <-chan string) bool {
 // redial reconnects to Codex's app-server after it dropped the connection,
 // trying for CodexGrace, and takes the new connection once the thread reads
 // there, loaded or not: the TUI resumes it when it reconnects, which can
-// take longer than the daemon (41s on October 29). Otherwise Codex really
+// take longer than the daemon. Otherwise Codex really
 // went away, or the thread stayed unreadable (deleted: ErrThreadEnded), and
 // the connector stops. The new connection becomes the one the rest use only
 // once checked, so nothing else reads the thread there before then.

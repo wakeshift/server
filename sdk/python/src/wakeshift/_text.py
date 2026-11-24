@@ -3,7 +3,7 @@ place, the same in every SDK (sdk/typescript/test/event-tools.json,
 subscribing-tools-list.json, wake-args.json, tool-output-schemas.json).
 
 COMPACT is subscribing-tools-list.json's compact_strings: the compact
-tools/list text that held in the bench (November 5, 2026), word for word.
+tools/list text, which tested as well as the longer wording, word for word.
 Compact is the only behavior. The subscribes sentence stays as it was: it's
 what gets agents to ask.
 """
@@ -26,7 +26,7 @@ COMPACT: dict[str, str] = {
     ),
     "unsubscribe_description": "Stop a subscription: the event and arguments, or its id.",
     "list_description": "List your subscriptions to this app's events, with ids.",
-    # The subscribes sentence, which the bench kept as it was.
+    # The subscribes sentence, kept as it was.
     "notifies": (
         "This tool is how {app} notifies you in this conversation{when}. {App} delivers its notifications through "
         "Wakeshift; the result may ask you to start a background listener and to offer the user a one-time install. "

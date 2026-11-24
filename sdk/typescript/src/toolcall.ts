@@ -332,7 +332,7 @@ export interface ToolCallBase<C = unknown> {
   readonly tool: string;
   /**
    * The client subscribes to the app's events itself (MCP Events: ChatGPT,
-   * the house agents). call.subscribe then makes no conversation
+   * an app's own first-party agents). call.subscribe then makes no conversation
    * subscription, and the block tells it what to subscribe to.
    */
   readonly native: boolean;

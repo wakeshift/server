@@ -14,8 +14,10 @@ package apps
 // every app, revoked keys included, so a link can't be replayed onto
 // another app.
 //
-// Both write app_log in the same transaction, with detail.via ("cli"), and
-// count against the abuse limits (limits.go).
+// Both write app_log in the same transaction, with detail.via ("cli"), mark
+// the key via cli_link, and count against the abuse limits (limits.go).
+// The console makes the person type the key code their terminal shows
+// before it posts (console/register.go).
 
 import (
 	"context"
@@ -29,11 +31,16 @@ import (
 	"github.com/jackc/pgx/v5/pgconn"
 
 	"github.com/wakeshift/server/internal/appkey"
+	"github.com/wakeshift/server/internal/orgs"
 )
 
-// ViaCLI is detail.via for an app or key registered from @wakeshift/cli's
-// link.
-const ViaCLI = "cli"
+// ViaCLI is the app log's detail.via for an app or key registered from
+// @wakeshift/cli's link; ViaCLILink is the same on the key itself
+// (Key.Via) and in the organization's log.
+const (
+	ViaCLI     = "cli"
+	ViaCLILink = "cli_link"
+)
 
 var (
 	// ErrBadPublicKey is a public key that isn't a usable Ed25519 key.
@@ -126,14 +133,15 @@ func DeleteKeys(ctx context.Context, tx pgx.Tx, id string) ([]string, error) {
 // insertPublicKey stores pub as one of app id's keys. A kid taken in the
 // meantime (app_keys_kid is unique) is ErrKeyUsed, in a savepoint so the
 // caller's transaction isn't aborted by it.
-func insertPublicKey(ctx context.Context, tx pgx.Tx, id, name string, pub ed25519.PublicKey, by string) (Key, error) {
+func insertPublicKey(ctx context.Context, tx pgx.Tx, id, name string, pub ed25519.PublicKey, from keyOrigin) (Key, error) {
 	sp, err := tx.Begin(ctx)
 	if err != nil {
 		return Key{}, err
 	}
 	defer sp.Rollback(ctx)
-	k, err := scanKey(sp.QueryRow(ctx, `INSERT INTO app_keys (app_id, key_id, kid, name, public_key, created_by) VALUES ($1, $2, $3, $4, $5, $6) RETURNING `+keyColumns,
-		id, KeyID(pub), appkey.KeyID(pub), name, []byte(pub), by))
+	k, err := scanKey(sp.QueryRow(ctx, `INSERT INTO app_keys (app_id, key_id, kid, name, public_key, created_by, created_role, via)
+		VALUES ($1, $2, $3, $4, $5, $6, nullif($7, ''), nullif($8, '')) RETURNING `+keyColumns,
+		id, KeyID(pub), appkey.KeyID(pub), name, []byte(pub), from.by, string(from.role), from.via))
 	var pgErr *pgconn.PgError
 	if errors.As(err, &pgErr) && pgErr.Code == "23505" {
 		return Key{}, ErrKeyUsed
@@ -158,10 +166,12 @@ func (r *Registry) CreateWithKey(ctx context.Context, tx pgx.Tx, user, org strin
 	return o, k, err
 }
 
-// RegisterKey adds pub (from ParsePublicKey) to app id as user, whose role
-// must allow managing keys, as CreateKey does, but with a key made on the
-// developer's machine: nothing secret is returned, and the log's
-// app.key_created carries via.
+// RegisterKey adds pub (from ParsePublicKey) to app id as user, as
+// CreateKey does, but with a key made on the developer's machine: nothing
+// secret is returned, the log's app.key_created carries via, and the key
+// is marked ViaCLILink. A link can be someone else's (phishing: their key
+// on your app), so only owners and admins register one on an existing app
+// (orgs.AppLinkKey); a developer makes keys in the console.
 func (r *Registry) RegisterKey(ctx context.Context, tx pgx.Tx, user, id, name string, pub ed25519.PublicKey, via string) (Key, error) {
 	name, err := validKeyName(name)
 	if err != nil {
@@ -172,9 +182,14 @@ func (r *Registry) RegisterKey(ctx context.Context, tx pgx.Tx, user, id, name st
 	if err := lockAccount(ctx, tx, user); err != nil {
 		return Key{}, err
 	}
-	if err := r.forNewKey(ctx, tx, user, id); err != nil {
+	from, err := r.forNewKey(ctx, tx, user, id)
+	if err != nil {
 		return Key{}, err
 	}
+	if !from.role.Can(orgs.AppLinkKey) {
+		return Key{}, orgs.ErrForbidden
+	}
+	from.via = ViaCLILink
 	if err := checkRegistrationRate(ctx, tx, user); err != nil {
 		return Key{}, err
 	}
@@ -191,7 +206,7 @@ func (r *Registry) RegisterKey(ctx context.Context, tx pgx.Tx, user, id, name st
 	} else if used {
 		return Key{}, ErrKeyUsed
 	}
-	k, err := insertPublicKey(ctx, tx, id, name, pub, userActor(user))
+	k, err := insertPublicKey(ctx, tx, id, name, pub, from)
 	if err != nil {
 		return Key{}, err
 	}

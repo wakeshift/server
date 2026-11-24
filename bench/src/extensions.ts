@@ -1,8 +1,8 @@
 // What a bench can add to the runner: targets beyond the local core (a hosted
 // core), scenarios the run's harnesses play together after their own, run
 // modes of their own, command-line options, work after the run and sections
-// in its report. The runner itself has none: a checkout that has more
-// registers it in src/extend.ts, which cli.ts loads when it's there.
+// in its report. The runner itself has none: a checkout can register extras
+// in a module cli.ts loads when it's there (src/extend.ts).
 
 import { existsSync } from "node:fs";
 import { fileURLToPath } from "node:url";

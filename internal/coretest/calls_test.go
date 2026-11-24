@@ -86,7 +86,7 @@ func TestCallsOneBlockPerCall(t *testing.T) {
 	if block.Meta[beacon.MetaKey] == nil || tickets(t, c, tenant) != 1 {
 		t.Fatalf("one beacon: meta %v, %d tickets", block.Meta, tickets(t, c, tenant))
 	}
-	// The action first, the once note last (vendor bench: Codex quoted a
+	// The action first, the once note last (in testing, Codex quoted a
 	// block that opened with it as if that were all).
 	if !strings.HasPrefix(block.Text, "Wakeshift can't wake this conversation yet. Ask the user now") || !strings.HasSuffix(block.Text, "This subscription ends after its first message.") ||
 		strings.Contains(block.Text, "an earlier result of this app's tools") {

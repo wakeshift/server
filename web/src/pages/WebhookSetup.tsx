@@ -11,6 +11,8 @@ import { Button, Input, Logo, useTitle } from '../components/ui'
 type Described = {
   app: string
   bot_tail: string
+  // key: the fingerprint of the key the bot proved, as its connector prints it.
+  key?: string
   expires_at: string
   state: 'open' | 'awaiting_proof' | 'on'
   error?: string
@@ -133,7 +135,7 @@ export default function WebhookSetup() {
         <P>
           Your bot confirmed the webhook. New messages from <b className="text-ink">{info.app}</b> now wake it, even while it's idle. You can close this page.
         </P>
-        <P>To stop wake-ups, ask your bot to stop watching, or delete the routine "Wakeshift wake-ups" in Grok.</P>
+        <P>To stop wake-ups, ask your bot to stop watching, or delete the routine "Wakeshift wake-ups" in your bot's Automations.</P>
       </>
     )
   } else if (!token || gone) {
@@ -177,8 +179,16 @@ export default function WebhookSetup() {
           your bot just created. Paste the routine's webhook URL and key below. Your bot then confirms the webhook is its own, and only its messages go there.
         </P>
         <p className="mt-3 text-xs leading-relaxed text-ink-3">
-          App: {info.app} · Bot ending in <code className="font-mono">…{info.bot_tail}</code> · This link works once, until {time(info.expires_at)}.
+          App: {info.app} · Bot ending in <code className="font-mono">…{info.bot_tail}</code>
+          {info.key && (
+            <>
+              {' '}
+              · Bot key <code className="font-mono">{info.key}</code>, the fingerprint your bot printed
+            </>
+          )}{' '}
+          · This link works once, until {time(info.expires_at)}.
         </p>
+        <P>Grok Bot runs in Cursor's cloud, so your bot's routines are Cursor Automations, and the webhook URL is on cursor.sh.</P>
         <P>
           <b className="text-ink">Where to find them:</b> in the bot, open Automations, then the routine "Wakeshift wake-ups", then its webhook trigger. The URL
           starts with <code className="font-mono text-[13px]">https://api2.cursor.sh/automations/webhook/</code>.
@@ -189,7 +199,7 @@ export default function WebhookSetup() {
           {error && <p className="text-sm text-danger">{error}</p>}
           <p className="text-xs leading-relaxed text-ink-3">
             Wakeshift keeps the key encrypted and uses it only to send this bot's messages to it. Each message starts a run in the bot, which counts toward your
-            usage. To stop wake-ups at any time, ask your bot to stop watching, or delete the routine "Wakeshift wake-ups" in Grok.
+            usage. To stop wake-ups at any time, ask your bot to stop watching, or delete the routine "Wakeshift wake-ups" in your bot's Automations.
           </p>
           <div className="flex items-center gap-3">
             <Button type="submit" disabled={busy}>

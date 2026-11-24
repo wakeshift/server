@@ -19,8 +19,8 @@ import (
 // whose ID is id: <ID>_URL, <ID>_KEY, <ID>_DATABASE_URL and
 // <ID>_TICK_ACCOUNT (with the ID in capitals), PROXY_HOPS,
 // GAMES_SHARED_SEAT_WORKSPACES, HOUSE_SECRET, GAMES_OPERATOR_NOTE,
-// GAMES_NEXT_GAME_PAUSE and ADMIN_DB_USER (the admin service's database
-// login, granted joins: joins.go). The fields after Store are the game
+// GAMES_NEXT_GAME_PAUSE and ADMIN_DB_USER (an optional external reader's
+// database login, granted joins: joins.go). The fields after Store are the game
 // App's fields of the same names.
 type Env struct {
 	id     string
@@ -83,10 +83,10 @@ func LoadEnv(ctx context.Context, id string, migrate func(context.Context, *Stor
 		}
 	}
 	if err == nil {
-		// The admin service reads joins for its alerts: failing to grant it
-		// them doesn't stop the game.
+		// An optional external reader reads joins (ADMIN_DB_USER): failing
+		// to grant it them doesn't stop the game.
 		if gerr := store.GrantJoins(open, os.Getenv("ADMIN_DB_USER")); gerr != nil {
-			slog.Warn(id+": granting the admin service joins failed", "err", gerr)
+			slog.Warn(id+": granting the joins reader joins failed", "err", gerr)
 		}
 	}
 	cancel()

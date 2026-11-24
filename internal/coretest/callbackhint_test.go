@@ -82,7 +82,7 @@ func TestUnreachableCallbackHint(t *testing.T) {
 		// a plugin from the marketplace, or hooks here).
 		{"a 500 to Claude Code", "claude-code", hook.url("e500"), true, "callback_failed", "http_5xx", claudeCode, ""},
 	} {
-		mcpevents.AllowLoopback = tc.loopback
+		mcpevents.SetAllowLoopback(tc.loopback)
 		code, e, raw := subscribe(tc.client, tc.cb, voucherSecret())
 		if code != 400 || e["code"] != tc.code {
 			t.Fatalf("%s: %d %s", tc.name, code, raw)
@@ -105,7 +105,7 @@ func TestUnreachableCallbackHint(t *testing.T) {
 		noCallback(tc.name, raw, tc.cb)
 		t.Logf("%s (%s): %s", tc.name, tc.client, raw)
 	}
-	mcpevents.AllowLoopback = true
+	mcpevents.SetAllowLoopback(true)
 
 	// No hint for anything else: a bad secret, a missing user, a callback
 	// URL too long, an unknown event.
@@ -153,7 +153,7 @@ func TestUnreachableCallbackHintNoSite(t *testing.T) {
 	eventsTestSetup(t)
 	c := coretest.Start(t)
 	app := eventsApp(t, c, "chat")
-	mcpevents.AllowLoopback = false
+	mcpevents.SetAllowLoopback(false)
 	code, raw, err := appPostRaw(c, app, "/api/apps/v1/events/subscribe", map[string]any{"call": map[string]any{"user": "u1", "client": "hermes-agent"},
 		"name": "chat.message", "arguments": eng, "delivery": delivery("https://192.168.1.20/hook", voucherSecret())})
 	if err != nil {
@@ -190,7 +190,7 @@ func TestUnreachableCallbackNothingSent(t *testing.T) {
 		}
 	}()
 	port := ln.Addr().(*net.TCPAddr).Port
-	mcpevents.AllowLoopback = false
+	mcpevents.SetAllowLoopback(false)
 	for _, cb := range []string{
 		fmt.Sprintf("https://127.0.0.1:%d/hook", port), // an IP that isn't public
 		fmt.Sprintf("https://localhost:%d/hook", port), // a name that resolves only to loopback
@@ -205,6 +205,12 @@ func TestUnreachableCallbackNothingSent(t *testing.T) {
 			strings.Contains(string(raw), "localhost") || strings.Contains(string(raw), "127.0.0.1") {
 			t.Fatalf("%s: %d %s", cb, code, raw)
 		}
+		// A name that resolves only to addresses that aren't public reads
+		// as one that couldn't be reached: the app can't use it to map
+		// the server's private DNS.
+		if strings.Contains(cb, "localhost") && (strings.Contains(string(raw), "isn't public") || !strings.Contains(string(raw), "couldn't be reached")) {
+			t.Fatalf("%s: the refusal tells the name's address apart: %s", cb, raw)
+		}
 	}
 	time.Sleep(50 * time.Millisecond)
 	if n := accepted.Load(); n != 0 {
@@ -218,7 +224,7 @@ func TestUnreachableCallbackHintPushOff(t *testing.T) {
 	eventsTestSetup(t)
 	c := coretest.StartWith(t, func(o *core.Options) { o.SiteURL = "https://wakeshift.example"; o.MCPEventsPush = false })
 	app := eventsApp(t, c, "chat")
-	mcpevents.AllowLoopback = false
+	mcpevents.SetAllowLoopback(false)
 	for _, tc := range []struct{ client, hint, help string }{
 		{"some-draft-client", `{"alternatives":["poll"],"kind":"callback_unreachable"}`, "Without one, use poll if the client supports it."},
 		{"claude-code", `{"alternatives":["plugin","poll"],"install":"https://wakeshift.example/docs/agents#the-one-time-install","kind":"callback_unreachable"}`,

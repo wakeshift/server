@@ -1,6 +1,6 @@
 package wakeshift
 
-// Attaching Wakeshift to an MCP server (design §2.3). Attach wraps the
+// Attaching Wakeshift to an MCP server. Attach wraps the
 // server at the protocol layer, never a vendor callback: at the HTTP layer
 // (Handler: the wake arguments stripped before the MCP library parses the
 // body, events/*, the wait tool, the POST as the unit of identity) and in
@@ -60,8 +60,9 @@ type AttachOptions struct {
 	WrapFunc func(tool string) []ToolOption
 	// BuiltinTools picks Wakeshift's own tools.
 	BuiltinTools BuiltinTools
-	// IsNativeClient, for house agents only, says that a caller the SDK
-	// can't recognize subscribes to events itself (MCP Events). False
+	// IsNativeClient, for first-party agents the app runs itself, says
+	// that a caller the SDK can't recognize subscribes to events itself
+	// (MCP Events). False
 	// leaves it to the SDK's own checks.
 	IsNativeClient func(ctx context.Context, r Request) bool
 	// Push is MCP Events push (events/stream), served over HTTP where

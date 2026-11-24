@@ -160,3 +160,70 @@ func TestShortKeyRefused(t *testing.T) {
 		t.Fatal("a short key was accepted")
 	}
 }
+
+// TakeAll counts under every limit or none: refused at one, it counts
+// nothing under the others, and concurrent TakeAlls sharing subjects never
+// count past a limit.
+func TestTakeAllIsAllOrNothing(t *testing.T) {
+	d := dbtest.New(t)
+	ctx := context.Background()
+	c := counter(t)
+	now := time.Date(2026, 11, 8, 12, 0, 0, 0, time.UTC)
+	wide := dblimit.Limit{Name: "wide", Max: 100, Window: time.Hour}
+	tight := dblimit.Limit{Name: "tight", Max: 1, Window: time.Hour}
+	both := []dblimit.Count{{Limit: wide, Subject: "a"}, {Limit: tight, Subject: "b"}}
+	if refused, err := c.TakeAll(ctx, d.Pool, both, now); err != nil || refused != nil {
+		t.Fatalf("first: %v %v", refused, err)
+	}
+	for range 5 {
+		if refused, err := c.TakeAll(ctx, d.Pool, both, now); err != nil || refused == nil || refused.Name != "tight" {
+			t.Fatalf("past tight: %v %v", refused, err)
+		}
+	}
+	// The refusals counted nothing under wide: it holds exactly one.
+	if n, _, err := c.Add(ctx, d.Pool, wide, "a", now); err != nil || n != 2 {
+		t.Fatalf("wide counted %d (with this one), want 2: %v", n, err)
+	}
+
+	// GiveBack uncounts one, in its own window only.
+	if err := c.GiveBack(ctx, d.Pool, tight, "b", now); err != nil {
+		t.Fatal(err)
+	}
+	if refused, err := c.TakeAll(ctx, d.Pool, both, now); err != nil || refused != nil {
+		t.Fatalf("after a give-back: %v %v", refused, err)
+	}
+	later := now.Add(2 * time.Hour) // tight's window is over: a new one
+	if refused, err := c.TakeAll(ctx, d.Pool, []dblimit.Count{{Limit: tight, Subject: "b"}}, later); err != nil || refused != nil {
+		t.Fatalf("a new window: %v %v", refused, err)
+	}
+	if err := c.GiveBack(ctx, d.Pool, tight, "b", now); err != nil {
+		t.Fatal(err)
+	}
+	if refused, _ := c.TakeAll(ctx, d.Pool, []dblimit.Count{{Limit: tight, Subject: "b"}}, later); refused == nil {
+		t.Fatal("a give-back for the old window uncounted the new one")
+	}
+
+	// Concurrent, in opposite orders: exactly Max get through, no deadlock.
+	pair := dblimit.Limit{Name: "pair", Max: 7, Window: time.Hour}
+	var ok atomic.Int32
+	var wg sync.WaitGroup
+	for i := range 20 {
+		wg.Go(func() {
+			cs := []dblimit.Count{{Limit: pair, Subject: "x"}, {Limit: pair, Subject: "y"}}
+			if i%2 == 1 {
+				cs[0], cs[1] = cs[1], cs[0]
+			}
+			refused, err := c.TakeAll(ctx, d.Pool, cs, now)
+			if err != nil {
+				t.Error(err)
+			}
+			if refused == nil && err == nil {
+				ok.Add(1)
+			}
+		})
+	}
+	wg.Wait()
+	if ok.Load() != 7 {
+		t.Fatalf("%d got through, want 7", ok.Load())
+	}
+}

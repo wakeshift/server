@@ -106,7 +106,9 @@ func (a *API) createAgent(w http.ResponseWriter, r *http.Request) {
 
 // streamLink returns a URL that streams an agent's deliveries, to paste
 // into the agent (e.g. Claude Code's Monitor). Apps hand out links the same
-// way; this is the console's.
+// way; this is the console's. Minting one is recorded in the workspace's
+// audit log in the same transaction (audit.StreamLinkCreated: the link's
+// ID, the agent and the expiry, never the URL).
 func (a *API) streamLink(w http.ResponseWriter, r *http.Request) {
 	var in struct {
 		Ack bool `json:"ack"`
@@ -125,10 +127,15 @@ func (a *API) streamLink(w http.ResponseWriter, r *http.Request) {
 		if err != nil {
 			return err
 		}
-		u, exp, err = a.Streams.Mint(ctx, tx, auth.TenantFrom(ctx), streams.NewLink{
+		var id string
+		id, u, exp, err = a.Streams.MintID(ctx, tx, auth.TenantFrom(ctx), streams.NewLink{
 			Agent: agent, Ack: in.Ack, CreatedBy: "user:" + auth.UserFrom(ctx).ID, TTL: streamLinkTTL,
 		})
-		return err
+		if err != nil {
+			return err
+		}
+		return audit.Record(ctx, tx, audit.Entry{Actor: audit.User(auth.UserFrom(ctx).ID), Action: audit.StreamLinkCreated, AgentID: agent,
+			Detail: map[string]any{"link": id, "ack": in.Ack, "expires_at": exp.UTC().Format(time.RFC3339)}})
 	})
 	if err != nil {
 		respond(w, nil, err)

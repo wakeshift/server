@@ -104,7 +104,7 @@ ChatGPT is woken only through MCP Events: it subscribes itself and receives each
 
 | The event | ChatGPT and other MCP Events clients | Claude Code, Codex and other agents |
 | --- | --- | --- |
-| The default | Served through a subscribe voucher: when your tool subscribes it, its result hands the client a one-time voucher for exactly that event and those arguments, which it uses to subscribe within 4 hours. No sign-in needed; with sign-in, only the same user can use it. `call.subscribe` returns `state: "native"` | Through your tools |
+| The default | Served through a subscribe voucher: when your tool subscribes it, its result hands the client a one-time voucher for exactly that event and those arguments, which it uses to subscribe within 4 hours. With sign-in, only the same user can use it; without, only from the session it keeps with your server (`Mcp-Session-Id`), and a client that keeps none, such as ChatGPT, gets no voucher, since anyone who read it could use it. `call.subscribe` returns `state: "native"` | Through your tools |
 | `personal` | Served, to a signed-in user | Your tools and `subscribe_events` |
 | `authorize` | Served if `authorize` allows, asked before your tool's reply and on every request | Your tools and `subscribe_events` |
 | `public` | Served, to a signed-in user | Your tools and `subscribe_events` |
@@ -139,5 +139,5 @@ Reopening an event later takes a new SDK publishing `authorize`, `personal` or `
 A shopping server offers `product.price.changed` and `product.availability.changed`, keyed by a watch ID its own `watch_product` tool mints. It has no sign-in, and agents subscribe only through `watch_product`.
 
 - **On the new SDK**, both events are tools-only, which is what it meant. Nothing that matters ends: no agent subscribed any other way. Its first deploy logs `event_closed` for both events with 0 subscriptions ended.
-- **ChatGPT** gets `state: "native"` from `watch_product`, with no sign-in: the tool's result hands it a voucher for that watch ID, and ChatGPT subscribes with it. A guessed watch ID without a voucher is refused.
-- **If it adds sign-in later**, nothing changes for ChatGPT: each voucher is then bound to the signed-in user. To let ChatGPT subscribe without calling `watch_product` first, it adds `authorize`, checking that the watch ID belongs to the caller. `public: true` would also work, but opens the events to anyone who learns a watch ID.
+- **ChatGPT** gets no voucher without sign-in: it keeps no session with the server, so a voucher would work for anyone who read it. A guessed watch ID without a voucher is refused.
+- **Once it adds sign-in**, `watch_product`'s result hands ChatGPT a voucher for that watch ID, bound to the signed-in user, and ChatGPT subscribes with it. To let ChatGPT subscribe without calling `watch_product` first, it adds `authorize`, checking that the watch ID belongs to the caller. `public: true` would also work, but opens the events to anyone who learns a watch ID.

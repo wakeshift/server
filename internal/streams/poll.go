@@ -48,6 +48,7 @@ package streams
 // as the stream does (with the same slow safety poll and paced timer).
 
 import (
+	"cmp"
 	"context"
 	"errors"
 	"log/slog"
@@ -194,6 +195,9 @@ type pollOpts struct {
 	loop *waitLoop
 	// taken, if set, is called once the stream is taken, before waiting.
 	taken func()
+	// app is the app whose link it's polled on (linkApp), counted in its
+	// share of the instance (enterApp) as PollRequest.App is.
+	app string
 }
 
 // WaitInstalled: an until=wait wait found the session's hooks connected
@@ -240,10 +244,16 @@ func (s *Server) TaskWait(ctx context.Context, p PollRequest, holder string) (Ba
 
 func (s *Server) longPoll(ctx context.Context, p PollRequest, o pollOpts) (_ Batch, err error) {
 	out := Batch{Deliveries: []Frame{}, Acked: []string{}}
-	if err := s.enter(p.Tenant + ":" + p.Agent + ":" + p.Target); err != nil {
+	place := p.Tenant + ":" + p.Agent + ":" + p.Target
+	if err := s.enter(place); err != nil {
 		return out, err
 	}
 	defer s.leave()
+	app := cmp.Or(p.App, o.app)
+	if err := s.enterApp(place, app); err != nil {
+		return out, err
+	}
+	defer s.leaveApp(app)
 	limit := p.Limit
 	if limit <= 0 || limit > MaxPollBatch {
 		limit = DefaultPollBatch
@@ -405,8 +415,8 @@ func (s *Server) longPoll(ctx context.Context, p PollRequest, o pollOpts) (_ Bat
 	// One check every Poll (or Renew, if sooner), and the stream's
 	// presence renewed in that check's transaction once Renew is (about)
 	// due: an idle poll or wait costs one transaction a renewal, not a
-	// claim and a renewal each in their own (finding 5 of the scalability
-	// review: two transactions every 30 s per waiting conversation).
+	// claim and a renewal each in their own (two transactions every 30 s
+	// per waiting conversation).
 	tick := time.NewTicker(min(s.poll(), s.renew()))
 	defer tick.Stop()
 	presentAt := time.Now() // taking the stream marked it connected
@@ -714,6 +724,16 @@ func ParseWait(v string) (time.Duration, error) {
 
 // ServePoll serves GET /v1/stream/poll.
 func (s *Server) ServePoll(w http.ResponseWriter, r *http.Request) {
+	// At capacity, refused before any database work (authorize loads the
+	// link, marking it used and sliding it), as a stream is.
+	var busyKey string
+	if c, err := s.parse(linkToken(r)); err == nil {
+		busyKey = refusalKey(c)
+		if err := s.atCapacity(busyKey); err != nil {
+			turnAway(w, err)
+			return
+		}
+	}
 	c, l, ok := s.authorize(w, r, true, true)
 	if !ok {
 		return
@@ -744,7 +764,10 @@ func (s *Server) ServePoll(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	batch, err := s.longPoll(r.Context(), PollRequest{Tenant: c.Tenant, Agent: l.Agent, Target: l.Target, Valid: linkValid(l.ID),
-		Acks: acks, Wait: wait, Limit: limit, Connector: l.Connector}, pollOpts{yieldBackground: true, patient: q.Get("background") != "stop"})
+		Acks: acks, Wait: wait, Limit: limit, Connector: l.Connector}, pollOpts{yieldBackground: true, patient: q.Get("background") != "stop", app: linkApp(l)})
+	if busyKey != "" {
+		s.admittedAs(busyKey, err)
+	}
 	background := errors.Is(err, ErrStreamConnected)
 	if background {
 		// The agent's wait command holds the stream (wait.go) and wakes the
@@ -842,6 +865,10 @@ func (s *Server) TakeHeld(ctx context.Context, p PollRequest) (Batch, error) {
 		return out, err
 	}
 	defer s.leave()
+	if err := s.enterApp(p.Tenant+":"+p.Agent+":"+p.Target, p.App); err != nil {
+		return out, err
+	}
+	defer s.leaveApp(p.App)
 	limit := p.Limit
 	if limit <= 0 || limit > MaxPollBatch {
 		limit = DefaultPollBatch

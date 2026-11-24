@@ -6,7 +6,7 @@ package wakeshift
 // ChatGPT reads), events/list, and events/subscribe, events/unsubscribe and
 // events/poll passed to Wakeshift, which verifies the client's callback and
 // POSTs occurrences to it, signed, in order. A tools-only event is refused
-// here, on every request (design §3); so is a native client without a
+// here, on every request; so is a native client without a
 // user, and one an event's Authorize refuses, asked on every request.
 
 import (

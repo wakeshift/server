@@ -96,11 +96,10 @@ func (f *fakeCapy) answer(plan ...int) {
 }
 
 // fastHooks shortens the agent webhooks' backoff and spacing for a test
-// (package variables: these tests don't run in parallel).
+// (package settings, changed atomically: a deliverer may still be reading
+// them while the cleanup restores them).
 func fastHooks(t *testing.T) {
-	base, spacing := agenthooks.BackoffBase, agenthooks.DefaultSpacing
-	agenthooks.BackoffBase, agenthooks.DefaultSpacing = 200*time.Millisecond, time.Millisecond
-	t.Cleanup(func() { agenthooks.BackoffBase, agenthooks.DefaultSpacing = base, spacing })
+	t.Cleanup(agenthooks.SetTestTimings(200*time.Millisecond, time.Millisecond))
 }
 
 var registerRE = regexp.MustCompile(`curl -X POST '([^']+)' -H 'content-type: application/json' -d '\{"url":"<the watch URL>"\}'`)

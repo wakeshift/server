@@ -1,6 +1,6 @@
 package connector
 
-// Redeem by call for Claude Code (docs/harnesses.md, "Redeem by call"), on
+// Redeem by call for Claude Code, on
 // with WAKESHIFT_REDEEM_BY_TOOL_CALL=1 in the hook's environment (and the
 // core's flag of the same name; off by default). The core's side:
 // internal/appapi (callredeem.go).

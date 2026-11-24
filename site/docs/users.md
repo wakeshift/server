@@ -27,7 +27,7 @@ Without sign-in, each conversation stands alone: Wakeshift identifies it from th
 const attached = wake.attach(server, { identify: (ctx) => ({ user: ctx.http?.authInfo?.extra?.userId as string | undefined }) })
 ```
 
-Personal events need a user, and so does a native subscription (ChatGPT) a client makes on its own; one your tool hands it a voucher for doesn't. In your own tools, `call.user` is who `identify` said.
+Personal events need a user, and so does a native subscription (ChatGPT) a client makes on its own; one your tool hands it a voucher for doesn't, if the client keeps a session with your server (ChatGPT doesn't). In your own tools, `call.user` is who `identify` said.
 
 A stateless MCP server never sees `initialize`, so it doesn't know the client's name, which tells Wakeshift which program the agent runs in. If your sign-in knows it (an OAuth registration's `client_name`, say), return it from `identify` as `client`:
 
@@ -60,7 +60,7 @@ app.use("/mcp", async (req, res, next) => {
 
 Many MCP servers pass the caller's API key or token straight through to their own API, and never check it themselves. Then `identify` can't know who the caller is from the request alone. Choose one of these:
 
-- **No `identify`.** Each conversation stands alone, and the `session_key` the agent passes is what ties its calls together. Your tools still subscribe, and Claude Code, Codex and the other agents are woken. ChatGPT and other MCP Events clients still subscribe with the vouchers your tools hand them. What you give up: personal events, native subscriptions a client makes on its own, and listing one person's subscriptions across conversations.
+- **No `identify`.** Each conversation stands alone, and the `session_key` the agent passes is what ties its calls together. Your tools still subscribe, and Claude Code, Codex and the other agents are woken. MCP Events clients that keep a session with your server still subscribe with the vouchers your tools hand them; ChatGPT, which keeps none, gets no voucher without sign-in. What you give up: personal events, native subscriptions a client makes on its own, and listing one person's subscriptions across conversations.
 - **`identify` asks your API who the credential belongs to**, with a "who am I" call, and returns your ID for that account. Then cache the answer, keyed by a hash of the credential (never the credential itself) for a minute or so, since `identify` runs on each request that needs it.
 
 If you call your API from `identify`:
@@ -137,3 +137,5 @@ await wake.forgetUser(user.id)
 ```
 
 It ends their subscriptions, closes their agents' streams, and deletes the workspace Wakeshift keeps for them, with everything in it listed above. It returns `true` if there was something to delete; calling it again returns `false`. If the same ID comes back later, it starts with an empty workspace.
+
+Forgetting a user takes a key that an owner or admin of the app's organization made, as forgetting one in the console does. A key a developer made gets `403 forbidden`.

@@ -26,7 +26,7 @@ type heldFrame struct {
 	} `json:"event"`
 }
 
-// S12, October 29: Codex spent a 20-minute turn calling Agent Chat's wait
+// In testing, Codex spent a long turn calling Agent Chat's wait
 // tool, which answered "stream_connected" at once, while its connector held
 // the person's DM for after the turn. A wait in a Codex thread whose
 // connector holds the stream now takes what the connector holds and hasn't

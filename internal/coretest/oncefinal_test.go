@@ -20,8 +20,7 @@ import (
 // listener acknowledges that delivery: a renewal between the write and the
 // ack mustn't close it (4001, "nothing more to do"), which would hand the
 // delivery back to a stream that's over, so it waited for the agent's next
-// tool call (vendor bench, Codex: the stream closed 82 ms after the
-// write). Once it's acked, the stream ends promptly, saying why.
+// tool call (in testing, Codex's stream closed right after the write). Once it's acked, the stream ends promptly, saying why.
 func TestOnceFinalDeliveryIsAckedBeforeTheStreamCloses(t *testing.T) {
 	const renew = time.Second
 	c := coretest.StartWith(t, func(o *core.Options) { o.StreamRenew = renew })

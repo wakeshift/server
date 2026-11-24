@@ -39,6 +39,7 @@ package mcpevents
 
 import (
 	"bytes"
+	"cmp"
 	"context"
 	"crypto/hmac"
 	"crypto/rand"
@@ -50,12 +51,15 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"net"
 	"net/http"
 	"net/netip"
 	"net/url"
+	"slices"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -83,18 +87,42 @@ const (
 var ErrTooManyWebhooks = fmt.Errorf("this user already has %d live webhook subscriptions to this app, the most allowed: "+
 	"unsubscribe from one (events/unsubscribe), or let one lapse, first", MaxWebhooks)
 
+// retryWindow and backoffBase are RetryWindow's and BackoffBase's values,
+// as nanoseconds: atomic, since the deliverer's goroutines read them
+// while a test may change them (SetRetryWindow, SetBackoffBase).
+var retryWindow, backoffBase atomic.Int64
+
+func init() {
+	retryWindow.Store(int64(15 * time.Minute))
+	backoffBase.Store(int64(30 * time.Second))
+}
+
 // RetryWindow is how long a delivery is retried from its first failure,
-// before it's abandoned (a gap). A variable so tests can shorten it.
-var RetryWindow = 15 * time.Minute
+// before it's abandoned (a gap).
+func RetryWindow() time.Duration { return time.Duration(retryWindow.Load()) }
 
 // BackoffBase is the wait before a delivery's second attempt; each next
 // one waits twice as long, up to 8 minutes, so MaxAttempts fit in
-// RetryWindow (tests shorten it).
-var BackoffBase = 30 * time.Second
+// RetryWindow.
+func BackoffBase() time.Duration { return time.Duration(backoffBase.Load()) }
+
+// SetRetryWindow changes RetryWindow for a test, until the returned func
+// restores it.
+func SetRetryWindow(d time.Duration) (restore func()) {
+	old := retryWindow.Swap(int64(d))
+	return func() { retryWindow.Store(old) }
+}
+
+// SetBackoffBase changes BackoffBase for a test, until the returned func
+// restores it.
+func SetBackoffBase(d time.Duration) (restore func()) {
+	old := backoffBase.Swap(int64(d))
+	return func() { backoffBase.Store(old) }
+}
 
 // Backoff is the wait before attempt n+1 of a delivery (n from 1).
 func Backoff(n int) time.Duration {
-	return min(BackoffBase<<max(n-1, 0), 8*time.Minute)
+	return min(BackoffBase()<<max(n-1, 0), 8*time.Minute)
 }
 
 // MaxAgeCap is the longest replay bound: anything longer is the same as
@@ -237,9 +265,13 @@ func SubscriptionID(tenant, session, callback, name string) string {
 	return "sub_" + hex.EncodeToString(sum[:12])
 }
 
-// AllowLoopback lets tests use http callbacks on loopback addresses. Never
-// set it outside tests.
-var AllowLoopback bool
+// allowLoopback lets tests use http callbacks on loopback addresses
+// (SetAllowLoopback): atomic, since the deliverer's goroutines read it.
+var allowLoopback atomic.Bool
+
+// SetAllowLoopback lets tests use http callbacks on loopback addresses, or
+// stops it. Never call it outside tests.
+func SetAllowLoopback(on bool) { allowLoopback.Store(on) }
 
 // CheckURL refuses a callback that isn't an absolute https URL (plain http
 // only to a loopback host, with AllowLoopback). Addresses are checked again
@@ -254,7 +286,7 @@ func CheckURL(raw string) error {
 		return errors.New("delivery.url is at most 2000 characters")
 	case u.Scheme == "https":
 		return nil
-	case u.Scheme == "http" && AllowLoopback && loopbackHost(u.Hostname()):
+	case u.Scheme == "http" && allowLoopback.Load() && loopbackHost(u.Hostname()):
 		return nil
 	}
 	return NotHTTPSError{"delivery.url must be https"}
@@ -285,7 +317,7 @@ func PublicAddr(a netip.Addr) bool { return publicAddr(a) }
 // publicAddr reports whether an address may be called back.
 func publicAddr(a netip.Addr) bool {
 	a = a.Unmap()
-	if AllowLoopback && a.IsLoopback() {
+	if allowLoopback.Load() && a.IsLoopback() {
 		return true
 	}
 	if !a.IsGlobalUnicast() || a.IsPrivate() || a.IsLoopback() || a.IsLinkLocalUnicast() {
@@ -351,7 +383,8 @@ var errPrivate = errors.New("the callback's address isn't public")
 
 // Client is the HTTP client for callbacks: public addresses only, checked
 // on every connection (so DNS can't point it inside), no redirects, no
-// proxy, a short timeout.
+// proxy, a short timeout. A request whose context is Pinned connects only
+// to the addresses pinned.
 func Client() *http.Client {
 	d := &net.Dialer{Timeout: 5 * time.Second, Control: func(_, address string, _ syscall.RawConn) error {
 		ap, err := netip.ParseAddrPort(address)
@@ -360,10 +393,212 @@ func Client() *http.Client {
 		}
 		return nil
 	}}
-	t := &http.Transport{DialContext: d.DialContext, Proxy: nil, TLSHandshakeTimeout: 5 * time.Second,
+	dial := func(ctx context.Context, network, address string) (net.Conn, error) {
+		pinned, _ := ctx.Value(pinKey{}).([]netip.Addr)
+		if len(pinned) == 0 {
+			return d.DialContext(ctx, network, address)
+		}
+		_, port, err := net.SplitHostPort(address)
+		if err != nil {
+			return nil, err
+		}
+		return dialPinned(ctx, d, network, port, pinned)
+	}
+	t := &http.Transport{DialContext: dial, Proxy: nil, TLSHandshakeTimeout: 5 * time.Second,
 		ResponseHeaderTimeout: Timeout, MaxIdleConnsPerHost: 4, IdleConnTimeout: time.Minute}
 	return &http.Client{Transport: t, Timeout: Timeout,
 		CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
+}
+
+// fallbackDelay is how long dialPinned waits on the first address family
+// before trying the other too, as net.Dialer does (RFC 8305).
+const fallbackDelay = 300 * time.Millisecond
+
+// dialPinned connects to one of addrs at port as d would to a name that
+// resolved to them: every address tried, the first's family in order and,
+// after fallbackDelay, the other family's in parallel; d's Timeout spread
+// over each family's addresses (at least 2s an attempt, as net's), and
+// d's Control checking each address at connect time. The first connection
+// wins; the error is the first family's first.
+func dialPinned(ctx context.Context, d *net.Dialer, network, port string, addrs []netip.Addr) (net.Conn, error) {
+	if len(addrs) == 0 {
+		return nil, errPrivate // nothing it may connect to
+	}
+	var primary, fallback []netip.Addr
+	for _, a := range addrs {
+		if a.Is4() == addrs[0].Is4() {
+			primary = append(primary, a)
+		} else {
+			fallback = append(fallback, a)
+		}
+	}
+	if d.Timeout > 0 {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, d.Timeout)
+		defer cancel()
+	}
+	nd := *d
+	nd.Timeout = 0 // the context's deadline, spread over the addresses below
+	serial := func(ctx context.Context, list []netip.Addr) (net.Conn, error) {
+		var first error
+		for i, a := range list {
+			actx, cancel := ctx, context.CancelFunc(func() {})
+			if dl, ok := ctx.Deadline(); ok {
+				per := max(time.Until(dl)/time.Duration(len(list)-i), 2*time.Second)
+				actx, cancel = context.WithTimeout(ctx, per)
+			}
+			c, err := nd.DialContext(actx, network, net.JoinHostPort(a.String(), port))
+			cancel()
+			if err == nil {
+				return c, nil
+			}
+			if first == nil {
+				first = err
+			}
+			if ctx.Err() != nil {
+				break
+			}
+		}
+		return nil, first
+	}
+	if len(fallback) == 0 {
+		return serial(ctx, primary)
+	}
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	type result struct {
+		c       net.Conn
+		err     error
+		primary bool
+	}
+	results := make(chan result, 2)
+	start := func(list []netip.Addr, primary bool) {
+		go func() {
+			c, err := serial(ctx, list)
+			results <- result{c, err, primary}
+		}()
+	}
+	start(primary, true)
+	timer := time.NewTimer(fallbackDelay)
+	defer timer.Stop()
+	var primaryErr, fallbackErr error
+	started, pending := false, 1
+	startFallback := func() {
+		if !started {
+			started = true
+			pending++
+			start(fallback, false)
+		}
+	}
+	for pending > 0 {
+		select {
+		case <-timer.C:
+			startFallback()
+		case r := <-results:
+			pending--
+			if r.err == nil {
+				cancel()
+				// The other family's connection, if it also connects, is closed.
+				go func(n int) {
+					for range n {
+						if o := <-results; o.c != nil {
+							o.c.Close()
+						}
+					}
+				}(pending)
+				return r.c, nil
+			}
+			if r.primary {
+				primaryErr = r.err
+				startFallback()
+			} else {
+				fallbackErr = r.err
+			}
+		}
+	}
+	return nil, cmp.Or(primaryErr, fallbackErr)
+}
+
+// pinKey is the context key of Pinned's addresses.
+type pinKey struct{}
+
+// Pinned is ctx for a callback request (Client) that connects only to
+// addrs, the addresses Resolve found and the caller counted, so what's
+// counted per address (appapi's verification limits) is where the request
+// goes, whatever the host's DNS answers next. A connection the client's
+// transport already holds to the host would be reused, so use a client of
+// its own (Client() is a new transport each time), as appapi's
+// verifications do.
+func Pinned(ctx context.Context, addrs []netip.Addr) context.Context {
+	return context.WithValue(ctx, pinKey{}, addrs)
+}
+
+// lookupNetIP resolves a callback's host (Resolve); a variable for tests.
+var lookupNetIP = net.DefaultResolver.LookupNetIP
+
+// Resolve returns the public addresses (publicAddr) a callback's host has,
+// every one, in the resolver's order, as a dial to the name would try
+// them; none public is errPrivate. An answer that mixes public addresses
+// with others keeps the public ones, as the dialer did before callbacks
+// were pinned (its Control refused each address that isn't public and it
+// went on to the next): the others are never dialed. Its errors are for
+// Unreachable.
+func Resolve(ctx context.Context, callback string) ([]netip.Addr, error) {
+	u, err := url.Parse(callback)
+	if err != nil {
+		return nil, err
+	}
+	host := u.Hostname()
+	var all []netip.Addr
+	if a, err := netip.ParseAddr(host); err == nil {
+		all = []netip.Addr{a}
+	} else {
+		ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+		defer cancel()
+		if all, err = lookupNetIP(ctx, "ip", host); err != nil {
+			return nil, err
+		}
+	}
+	var out []netip.Addr
+	for _, a := range all {
+		if a = a.Unmap(); publicAddr(a) && !slices.Contains(out, a) {
+			out = append(out, a)
+		}
+	}
+	if len(out) == 0 {
+		return nil, errPrivate
+	}
+	return out, nil
+}
+
+// Unreachable is the verification failure for a callback that couldn't be
+// connected to (err, from Resolve or the request). The app is told only
+// that it couldn't be reached, as for a name that doesn't resolve or a
+// closed port: not that a name resolved to an address that isn't public,
+// which would let an app map the names this server's resolver knows
+// inside its network. A callback given as an IP literal that isn't public
+// is told so: that tells the app nothing it didn't know. The detail is
+// logged.
+func Unreachable(callback string, err error) *CallbackError {
+	private := errors.Is(err, errPrivate)
+	host := ""
+	if u, perr := url.Parse(callback); perr == nil {
+		host = u.Hostname()
+	}
+	detail := err
+	var ue *url.Error
+	if errors.As(err, &ue) {
+		detail = ue.Err // without the URL, which may carry a query string
+	}
+	slog.Info("mcp events: a callback couldn't be reached for verification", "host", host, "private", private, "err", detail)
+	if _, perr := netip.ParseAddr(host); private && perr == nil {
+		return &CallbackError{Reason: ReasonRefused, Detail: "the callback's address isn't public"}
+	}
+	reason := ReasonRefused
+	if !private {
+		reason = reasonOf(err)
+	}
+	return &CallbackError{Reason: reason, Detail: "the callback couldn't be reached"}
 }
 
 // Sent is what a callback answered.
@@ -431,10 +666,7 @@ func Verify(ctx context.Context, c *http.Client, callback, sub string, secret []
 	body, _ := json.Marshal(map[string]string{"type": "verification", "challenge": challenge})
 	got, err := Send(ctx, c, callback, sub, "msg_verification_"+challenge[:16], body, now, secret)
 	if err != nil {
-		if errors.Is(err, errPrivate) {
-			return &CallbackError{Reason: ReasonRefused, Detail: "the callback's address isn't public"}
-		}
-		return &CallbackError{Reason: reasonOf(err), Detail: "the callback couldn't be reached"}
+		return Unreachable(callback, err)
 	}
 	switch {
 	case got.Status/100 == 4:

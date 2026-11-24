@@ -12,8 +12,7 @@ import (
 	"github.com/wakeshift/server/internal/harnesses"
 )
 
-// Ask once per conversation, action first (vendor bench, November 6, 2026:
-// a status tool that subscribes on every poll repeated the whole ask, and
+// Ask once per conversation, action first (in testing, a status tool that subscribes on every poll repeated the whole ask, and
 // Claude Code set the copies aside as a repeated injected request; Codex
 // quoted a block that opened with "This subscription ends after its first
 // message." as if that were all of it, and asked nothing). The full ask

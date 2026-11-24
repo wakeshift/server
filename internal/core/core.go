@@ -58,7 +58,10 @@ type Options struct {
 	Key            func(purpose string) []byte
 	Apps           []apps.Config
 	AllowedSignups string
-	DevSignIn      bool
+	// ClosedSignups: only AllowedSignups make new accounts (accounts.Store.Closed;
+	// config.Config.SignupsClosed).
+	ClosedSignups bool
+	DevSignIn     bool
 	// DevSignInToken is what dev sign-in must present (auth.Console).
 	DevSignInToken string
 	// TermsURL, TermsVersion and PrivacyURL are the Terms new accounts
@@ -161,7 +164,7 @@ func New(ctx context.Context, o Options) (*Core, error) {
 	signIn := &auth.Console{
 		Key: o.Key("console-session"), PublicURL: o.PublicURL, DevSignIn: o.DevSignIn, DevSignInToken: o.DevSignInToken, Google: o.Google, GitHub: o.GitHub,
 		SiteURL: o.SiteURL, TermsURL: o.TermsURL, PrivacyURL: o.PrivacyURL, SupportEmail: o.SupportEmail,
-		Accounts: &accounts.Store{Pool: o.DB.Pool, Allowed: accounts.AllowList(o.AllowedSignups), InvitesPerUser: o.InvitesPerUser, TermsVersion: o.TermsVersion},
+		Accounts: &accounts.Store{Pool: o.DB.Pool, Allowed: accounts.AllowList(o.AllowedSignups), Closed: o.ClosedSignups, InvitesPerUser: o.InvitesPerUser, TermsVersion: o.TermsVersion},
 	}
 	hub := notify.New(o.DB.Pool, deliveries.NotifyChannel, streams.TakeoverChannel, streams.RevokedChannel, streams.PushEndedChannel)
 	// Streams waiting for deliveries check again whenever the listener
@@ -251,6 +254,8 @@ func New(ctx context.Context, o Options) (*Core, error) {
 		Web:     o.Web,
 		HSTS:    strings.HasPrefix(o.PublicURL, "https://"),
 		SiteURL: o.SiteURL,
+		// security.txt's contact.
+		SupportEmail: o.SupportEmail,
 		APIs: []server.Registrar{
 			signIn, signInWith,
 			&console.API{DB: o.DB, Auth: signIn, SupportEmail: o.SupportEmail, Streams: deliver, Apps: registry, AppAPI: appAPI, Mail: o.Mail},
@@ -290,7 +295,7 @@ func adminAPI(ctx context.Context, o Options, registry *apps.Registry, appAPI *a
 func (c *Core) Run(ctx context.Context) {
 	go c.hub.Run(ctx)
 	go c.expireGrants(ctx)
-	go c.webhooks.Run(ctx)   // MCP Events deliveries (ChatGPT, house agents)
+	go c.webhooks.Run(ctx)   // MCP Events deliveries (ChatGPT, first-party agents)
 	go c.agentHooks.Run(ctx) // agent-hosted webhooks (Capy)
 	(&pipeline.Runner{DB: c.db, Poll: c.poll, Delivered: func(tenant, agent string) {
 		c.webhooks.Wake(tenant, agent)
@@ -680,8 +685,7 @@ func (c *Core) expireJobAlone(ctx context.Context, tenant string, job expiryJob,
 // setJobTimeouts bounds the expiry pass's transaction in a workspace. Each
 // job is bounded (batches, indexes), and this makes sure of it: a job that
 // plans badly fails and is retried on the next pass, instead of holding its
-// locks, and the oldest snapshot vacuum must keep, for hours (as
-// CancelStranded once did).
+// locks, and the oldest snapshot vacuum must keep, for hours.
 func setJobTimeouts(ctx context.Context, tx pgx.Tx) error {
 	for _, set := range jobTimeouts {
 		if _, err := tx.Exec(ctx, set); err != nil {

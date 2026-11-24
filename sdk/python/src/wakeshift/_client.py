@@ -1188,7 +1188,7 @@ class Wakeshift:
         the request is refused (your tool still runs). ``require_user=True``
         refuses an anonymous caller the same way, so a session_key is never
         a bearer. ``is_native_client`` tells, for callers the SDK can't
-        recognize (an app's own house agents), whether the client subscribes
+        recognize (an app's own first-party agents), whether the client subscribes
         to events itself. ``push`` tunes MCP Events push (``events/stream``),
         served where Wakeshift offers it and the server answers with streams:
         ``False`` serves none (a host that can't hold a response open), and

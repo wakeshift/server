@@ -1,9 +1,9 @@
 package gamekit
 
 // Joins: each seat an outside player takes is noted in joins (011_joins.sql),
-// in the seat's own transaction, for Wakeshift's alerts: the hosted
-// service's admin tools read the table and post each join. House agents'
-// seats aren't noted. Noting one is best effort: a failure is logged and
+// in the seat's own transaction, for an optional external reader (an
+// operator's alerts, say) that reads the table with its own database login
+// (ADMIN_DB_USER). House agents' seats aren't noted. Noting one is best effort: a failure is logged and
 // the seat stands.
 
 import (
@@ -20,7 +20,7 @@ import (
 // (whose joins go with it, endSession).
 const joinsFor = SessionIdle
 
-// JoinsColumns are the columns of joins the admin service may read: every
+// JoinsColumns are the columns of joins the external reader may read: every
 // one but player (the sign-in).
 const JoinsColumns = "id, at, agent, name, returned, prev_at, seated"
 
@@ -39,7 +39,7 @@ func noteJoin(tx *Tx, game string, p Player) {
 		return err
 	})
 	if err != nil {
-		slog.Warn("gamekit: noting a join for the admin service failed", "err", err)
+		slog.Warn("gamekit: noting a join failed", "err", err)
 	}
 }
 
@@ -49,23 +49,23 @@ func (s *Server) forgetJoins(ctx context.Context, now time.Time) error {
 	return err
 }
 
-// GrantJoins lets login, the admin service's database login (on Cloud SQL,
-// its IAM user), connect to the store's database and read JoinsColumns of
-// joins, and nothing else. A login that doesn't exist yet is skipped (the
-// admin service reads nothing from this game until it does).
+// GrantJoins lets login, the external reader's database login, connect to
+// the store's database and read JoinsColumns of joins, and nothing else. A
+// login that doesn't exist yet is skipped (the reader reads nothing from
+// this game until it does).
 func (s *Store) GrantJoins(ctx context.Context, login string) error {
 	if login == "" {
 		return nil
 	}
 	if strings.HasPrefix(login, "pg_") || strings.HasPrefix(login, "cloudsql") {
-		return errors.New("gamekit: that can't be the admin service's login")
+		return errors.New("gamekit: that can't be the joins reader's login")
 	}
 	var exists bool
 	if err := s.Pool.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = $1)`, login).Scan(&exists); err != nil {
 		return err
 	}
 	if !exists {
-		slog.Warn("gamekit: the admin service's database login doesn't exist yet; not granting it joins", "login", login)
+		slog.Warn("gamekit: the joins reader's database login doesn't exist yet; not granting it joins", "login", login)
 		return nil
 	}
 	role := pgx.Identifier{login}.Sanitize()

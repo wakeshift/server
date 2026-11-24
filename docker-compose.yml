@@ -23,11 +23,13 @@
 # Or set up a GitHub or Google OAuth app (the variables below).
 services:
   postgres:
-    image: postgres:17.11
+    image: postgres:17.11@sha256:ff87138949ad9a46f32ff23bd6852b52ce024a13dffe9b4087be98292cdd3b4f
     environment:
       POSTGRES_USER: postgres
       # This local database's superuser, used only by the init script below.
       POSTGRES_PASSWORD: postgres
+    # For `make run` and `make test`, which run on this machine. If port
+    # 5439 is taken, set WAKESHIFT_DB_PORT to another.
     ports:
       - "127.0.0.1:${WAKESHIFT_DB_PORT:-5439}:5432"
     volumes:
@@ -50,9 +52,13 @@ services:
     ports:
       - "127.0.0.1:8370:8370"
     environment:
-      # The owner role from deploy/postgres-init.sql: not a superuser, so
-      # row-level security applies.
-      DATABASE_URL: postgres://wakeshift:wakeshift@postgres:5432/wakeshift?sslmode=disable
+      # The two roles from deploy/postgres-init.sql, neither a superuser, so
+      # row-level security applies: the owner migrates at startup, then the
+      # server runs as a role that only reads and writes. (A database
+      # volume made before deploy/postgres-init.sql had the second role
+      # needs it created by hand, as that file does.)
+      DATABASE_URL: postgres://wakeshift_server:wakeshift_server@postgres:5432/wakeshift?sslmode=disable
+      WAKESHIFT_MIGRATE_DATABASE_URL: postgres://wakeshift:wakeshift@postgres:5432/wakeshift?sslmode=disable
       WAKESHIFT_ADDR: ":8370"
       WAKESHIFT_PUBLIC_URL: http://localhost:8370
       # Required: at least 32 random bytes (openssl rand -base64 48). Unset,
@@ -71,8 +77,13 @@ services:
       WAKESHIFT_GITHUB_CLIENT_SECRET: ${WAKESHIFT_GITHUB_CLIENT_SECRET:-}
       WAKESHIFT_GOOGLE_CLIENT_ID: ${WAKESHIFT_GOOGLE_CLIENT_ID:-}
       WAKESHIFT_GOOGLE_CLIENT_SECRET: ${WAKESHIFT_GOOGLE_CLIENT_SECRET:-}
-      # Who may create an account (comma-separated emails and @domains).
+      # Who may create an account: comma-separated emails and @domains
+      # (Google Workspace domains). Sign-up is closed to everyone else, so
+      # put yourself here before you first sign in. WAKESHIFT_OPEN_SIGNUPS=1
+      # opens it to anyone, up to a cap (docs/self-hosting.md, "Who can
+      # sign up").
       WAKESHIFT_ALLOWED_SIGNUPS: ${WAKESHIFT_ALLOWED_SIGNUPS:-}
+      WAKESHIFT_OPEN_SIGNUPS: ${WAKESHIFT_OPEN_SIGNUPS:-}
 
 volumes:
   pgdata:

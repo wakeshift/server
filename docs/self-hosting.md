@@ -19,14 +19,15 @@ Run the container image, `ghcr.io/wakeshift/server:<version>`, built and signed 
 
 ## Postgres
 
-Use Postgres 17. Give the server a database owned by an ordinary role that has `CREATEROLE` (a migration creates a read-only role for an optional admin service, and refuses to run without it):
+Use Postgres 17, with two ordinary roles: one that owns the database and migrates it, and one for the server that only reads and writes. The owner needs `CREATEROLE` (a migration creates a read-only role for an optional admin service, and refuses to run without it):
 
 ```sql
 CREATE ROLE wakeshift LOGIN PASSWORD '…' NOSUPERUSER NOBYPASSRLS CREATEROLE;
+CREATE ROLE wakeshift_server LOGIN PASSWORD '…' NOSUPERUSER NOBYPASSRLS NOCREATEROLE NOCREATEDB;
 CREATE DATABASE wakeshift OWNER wakeshift;
 ```
 
-That role owns the tables and migrates them. To keep the server itself from altering tables, give it a second role with only reads and writes: set `WAKESHIFT_MIGRATE_DATABASE_URL` to the owner's URL and `DATABASE_URL` to a role that owns nothing. At each start the owner migrates, then grants the server's role what it needs. The server refuses to start if its own role owns a table or can become the owner.
+Set `WAKESHIFT_MIGRATE_DATABASE_URL` to the owner's URL and `DATABASE_URL` to the server's role, as [docker-compose.yml](../docker-compose.yml) and [deploy/postgres-init.sql](../deploy/postgres-init.sql) do. At each start the owner migrates, then grants the server's role what it needs: reads and writes on the tables, but not altering them, and neither updating nor deleting the audit log. The server refuses to start if its own role owns a table or can become the owner. Without `WAKESHIFT_MIGRATE_DATABASE_URL`, the server runs as the owner, which works but can alter the tables, including the audit log's protections.
 
 Finished deliveries and events are deleted after 30 days. Back up the database as you would any other; it holds sealed secrets that only `WAKESHIFT_SECRET_KEY` opens, so back up the key separately.
 
@@ -45,16 +46,21 @@ Set both halves of a pair, or neither. The compose file passes these through fro
 
 To use the console on your own computer without an OAuth app, run `make run`: Postgres in compose, and the server on the host at `127.0.0.1:8370` with `WAKESHIFT_DEV_SIGN_IN=1`. At startup it prints a one-time development sign-in token and a link; the console asks for the token, then signs you in with just an email, creating the account on first use.
 
+`make run` needs Go 1.27 and Node 22 or later, besides Docker. Postgres is published on `127.0.0.1:5439`; if port 5439 is taken, run `WAKESHIFT_DB_PORT=5440 make run`. If you ran the compose setup from the README first, stop it and remove its database with `docker compose down -v` before `make run`: `make run` needs port 8370, and it uses a different secret key, so with the old database it warns "oauth: skipping a signing key … was WAKESHIFT_SECRET_KEY changed?".
+
 Development sign-in works only when `WAKESHIFT_PUBLIC_URL` is a `localhost` URL and the request's connection comes from loopback. That's why it isn't in compose: a browser's connection to a container arrives from Docker's network, not loopback. Never set it on a server other people can reach, and never behind a reverse proxy, which connects from the same machine on everyone's behalf. `make run` also uses the published development secret key, which the server accepts only on `localhost`.
 
-## The sign-up cap
+## Who can sign up
 
-A fresh install admits 50 accounts. From the 51st, a new sign-in joins a waitlist instead of getting an account. People invited to an organization, and people on the allow list, get accounts whatever the cap:
+Sign-up is closed by default: only the people on the allow list get accounts.
 
-- `WAKESHIFT_ALLOWED_SIGNUPS`: comma-separated emails and `@domains` who may always create an account, such as `@example.com,ada@example.org`.
-- To change the cap, update its one row as the database's owner: `UPDATE signup_cap SET cap = 500, updated_at = now();`. Existing users can always sign in.
+- `WAKESHIFT_ALLOWED_SIGNUPS`: comma-separated emails and `@domains`, such as `@example.com,ada@example.org`. An `@domain` matches Google accounts that the domain manages (Google Workspace). Put yourself on it before you first sign in: with the list empty, nobody new can make an account, and the server says so at startup.
+- Anyone else who signs in joins a waitlist, with no account. Invite links and organization invites don't admit them either; add them to the list instead. To let one in, mark their entry invited as the database's owner, and their next sign-in makes the account: `UPDATE waitlist SET invited_at = now() WHERE email = 'cy@example.org';`.
+- Existing users can always sign in.
 
-`WAKESHIFT_INVITES_PER_USER` (default 5) is how many people each user may invite.
+To open sign-up as the hosted service has it, set `WAKESHIFT_OPEN_SIGNUPS=1`. Then a fresh install admits anyone for its first 50 accounts. From the 51st, a new sign-in joins the waitlist instead. People invited to an organization or with a user's invite link, and people on the allow list, get accounts whatever the cap. To change the cap, update its one row as the database's owner: `UPDATE signup_cap SET cap = 500, updated_at = now();`. `WAKESHIFT_INVITES_PER_USER` (default 5) is how many people each user may invite.
+
+Development sign-in (`make run`, above) makes any account it's asked for, whatever these settings.
 
 ## Point the SDKs, CLI and plugins at your server
 
@@ -74,14 +80,15 @@ Everything published defaults to the hosted service, `https://app.wakeshift.ai`.
 
 ### The connector and installs
 
-The image carries no connector binaries, so out of the box `/install/<harness>.sh` and `/download/` serve nothing, and only the agents that need no install are woken: Claude Code through its Monitor, Cursor, Copilot CLI and Antigravity CLI through their background commands, and MCP Events clients. To serve installs, either:
+The image carries no connector binaries, so out of the box `/download/` serves nothing, `/install/<harness>.sh` serves a script that only says the connector isn't available, and only the agents that need no install are woken: Claude Code through its Monitor, Cursor, Copilot CLI and Antigravity CLI through their background commands, and MCP Events clients. To serve installs, either:
 
-- **Build the connector** for each platform into a directory, and point `WAKESHIFT_CONNECTOR_DIR` at it:
+- **Build the connector** for each platform into a directory, such as `bin/connector/` (`bin/` is gitignored), and point `WAKESHIFT_CONNECTOR_DIR` at it:
 
   ```sh
   for p in darwin/arm64 darwin/amd64 linux/arm64 linux/amd64; do
-    CGO_ENABLED=0 GOOS=${p%/*} GOARCH=${p#*/} go build -trimpath -o connector/wakeshift-${p%/*}-${p#*/} ./cmd/wakeshift-connector
+    CGO_ENABLED=0 GOOS=${p%/*} GOARCH=${p#*/} go build -trimpath -o bin/connector/wakeshift-${p%/*}-${p#*/} ./cmd/wakeshift-connector
   done
+  WAKESHIFT_CONNECTOR_DIR=$PWD/bin/connector make run
   ```
 
   The server then serves those binaries, and install scripts that pin your `WAKESHIFT_PUBLIC_URL` as the only issuer. OpenClaw's script also needs its plugin packed into the same directory; its npm package (`WAKESHIFT_OPENCLAW_PLUGIN`) doesn't.
@@ -99,14 +106,14 @@ Push the result to a repository of your own and set `WAKESHIFT_AGENT_PLUGINS=<ow
 
 - `WAKESHIFT_SITE_URL`: your public site. The console links its Docs to `$WAKESHIFT_SITE_URL/docs` (with no site, to wakeshift.ai's), and the server redirects `/llms.txt`, `/llms-full.txt` and `/AGENTS.md` there. Unset, it's `WAKESHIFT_PUBLIC_URL` without a leading `app.`, or none.
 - `WAKESHIFT_TERMS_URL` and `WAKESHIFT_TERMS_VERSION` (both or neither), and `WAKESHIFT_PRIVACY_URL` (only with the Terms): your own Terms of Service and privacy policy. The version is any short label, such as the Terms' date. Only with them does sign-in say "By signing in, you agree to…" and record which version each new account accepted.
-- `WAKESHIFT_SUPPORT_EMAIL`: where app owners are told to write about a suspension or a limit, in API errors and the console (default `support@wakeshift.ai`: set your own).
+- `WAKESHIFT_SUPPORT_EMAIL`: where app owners are told to write about a suspension or a limit, in API errors and the console, and the contact in the server's `/.well-known/security.txt`, beside this repository's security advisories (default `support@wakeshift.ai`: set your own).
 
 ## Behind a proxy or load balancer
 
 Terminate TLS in front of the server and pass requests through unbuffered: stream links, long polls and `events/stream` hold a request open for up to an hour, with a write at least every 45 seconds. Keep the proxy's idle timeout above 60 seconds and its request timeout above an hour, or the client reconnects more often (nothing is lost; it costs a reconnect).
 
 - `WAKESHIFT_PROXY_HOPS`: how many trusted proxies append to `X-Forwarded-For` in front of the server, for limits per client address (default 0: the connection's address).
-- `WAKESHIFT_MAX_STREAMS`: the most streams and long polls one instance holds at once (default: no cap). Past it, new ones get 503 with `Retry-After`. Set it below your platform's per-instance request limit.
+- `WAKESHIFT_MAX_STREAMS`: the most streams and long polls one instance holds at once (default 900; `0`: no cap). Past it, new ones get 503 with `Retry-After`, and one app holding a quarter of it gets another only while more than a quarter is free. Set it below your platform's per-instance request limit and the process's open-file limit.
 
 ### Keep credentials out of access logs
 

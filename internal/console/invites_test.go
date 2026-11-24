@@ -134,7 +134,7 @@ func TestInvites(t *testing.T) {
 	}
 	sent := fake.Sent()
 	if len(sent) != 1 || sent[0].To != "cy@example.com" || !strings.Contains(sent[0].Text, s.URL) || !strings.Contains(sent[0].HTML, s.URL) ||
-		!strings.Contains(sent[0].Subject, "ada@example.com invited you to join Acme") {
+		sent[0].Subject != "You're invited to an organization on Wakeshift" || !strings.Contains(sent[0].Text, "ada@example.com invited you to join Acme") {
 		t.Fatalf("email: %+v", sent)
 	}
 

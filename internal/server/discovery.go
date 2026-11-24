@@ -3,14 +3,41 @@ package server
 import (
 	"net/http"
 	"strings"
+	"time"
 )
+
+// AdvisoriesURL is where a vulnerability in the server's code can be
+// reported privately (GitHub's security advisories for the public
+// repository), split so tools that rewrite the module path
+// leave it alone.
+const AdvisoriesURL = "https://github.com/wakeshift/" + "server/security/advisories/new"
+
+// securityTxt is the server's /.well-known/security.txt (RFC 9116): who to
+// tell about a vulnerability in this deployment (its support address,
+// WAKESHIFT_SUPPORT_EMAIL) and in the server's code (AdvisoriesURL). Its
+// Expires is always about a year out, so a self-hosted server never serves
+// a stale one. The hosted service's public site serves its own.
+func securityTxt(supportEmail string) http.HandlerFunc {
+	contact := ""
+	if e := strings.TrimSpace(supportEmail); e != "" && !strings.ContainsAny(e, "\r\n") {
+		contact = "Contact: mailto:" + e + "\n"
+	}
+	return func(w http.ResponseWriter, _ *http.Request) {
+		expires := time.Now().UTC().Truncate(24*time.Hour).AddDate(1, 0, 0)
+		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+		w.Header().Set("Cache-Control", "public, max-age=86400")
+		w.Write([]byte(contact + "Contact: " + AdvisoriesURL + "\n" +
+			"Expires: " + expires.Format(time.RFC3339) + "\n" +
+			"Preferred-Languages: en\n"))
+	}
+}
 
 // The console's host is the app, not the site: what crawlers and coding
 // agents look for at a host's root is either sent to the site or refused,
 // never answered with the app's HTML and a 200, which reads as a page
 // that exists.
 
-// siteFiles are the docs for coding agents the site serves (site/llms.go),
+// siteFiles are the docs for coding agents the hosted site serves,
 // by their lowercased path, and their path there. A request for one on the
 // console's host is redirected to the site.
 var siteFiles = map[string]string{

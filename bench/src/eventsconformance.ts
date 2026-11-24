@@ -3,7 +3,9 @@
 //
 //   node dist/src/eventsconformance.js [--suite <checkout>] [--app ts-v2]
 //        [--scenarios events-poll,events-webhook] [--results out.json] [--summary out.md]
-//   make bench-events-conformance
+//
+// (in bench/, after npx tsc -p tsconfig.json, with WAKESHIFT_TEST_DATABASE_URL
+// set as for the Go tests)
 //
 // The suite is modelcontextprotocol/conformance#521, still open, run from its
 // branch at the commit mcp-events/conformance.json pins (fetched and built

@@ -5,8 +5,8 @@ package deliveries
 // of how long the delivered ones took. Every index on deliveries begins
 // with tenant_id, so a per-app or platform count over the table would scan
 // all of it; the expiry pass instead counts each workspace's on
-// deliveries_finished and writes the totals here, for the admin service
-// (and, later, billing) to read.
+// deliveries_finished and writes the totals here, for usage reports
+// (the admin API) to read.
 
 import (
 	"context"
@@ -28,7 +28,7 @@ const UsageBuckets = 42
 const UsageRetention = 400 * 24 * time.Hour
 
 // UsageZone is the time zone of usage_daily's days, and of every day the
-// admin service shows: Pacific time, the team's.
+// usage report shows: Pacific time.
 var UsageZone = func() *time.Location {
 	l, err := time.LoadLocation("America/Los_Angeles")
 	if err != nil {

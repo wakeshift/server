@@ -24,7 +24,7 @@ package appapi
 // subscribe_events, natively or by polling, and rows without via whose
 // destination is native (a webhook or a poll). A conversation's without
 // via is kept: it can't be told from one the app's tool made, and ending
-// it would break those on upgrade (the design's decision 4). Each
+// it would break those on upgrade. Each
 // workspace's audit log records the change, with how many it ended and
 // kept. Opening an event (tools → any) is recorded the same way.
 

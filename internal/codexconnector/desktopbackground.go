@@ -23,14 +23,33 @@ import (
 
 // Permissions for a background turn (the user's choice: SetBackground).
 const (
-	// PermissionsReadOnly (the default): read-only sandbox; nothing asks
-	// for approval, as nobody is there to give it.
+	// PermissionsReadOnly (the default): read-only sandbox. Whatever the
+	// permissions, a background turn runs with backgroundApproval.
 	PermissionsReadOnly = "read-only"
 	// PermissionsWorkspaceWrite: the thread's workspace is writable.
 	PermissionsWorkspaceWrite = "workspace-write"
 	// PermissionsThread: the sandbox the thread's last turn ran with.
 	PermissionsThread = "thread"
 )
+
+// backgroundApproval is the approval policy of every background turn. Codex
+// asks for approval before running any command but its known-safe
+// read-only ones, and the connector refuses every request (handle): nobody
+// is there to approve, and the turn's input is outside data that may carry
+// a prompt injection. So in a background turn, a command that needs
+// approval fails; the model sees that it failed and can still reply, and
+// the turn still completes, which acknowledges its events. It's set on
+// thread/resume and turn/start, whatever the user's config.toml says.
+//
+// Codex 0.171 refuses "untrusted" as a config value (approval_policy = ...
+// "is no longer supported") and exits, though its app-server protocol still
+// takes it, so the process gets processApproval (never "never"). A Codex
+// that refuses it in the requests too fails the turn (errApprovalRefused):
+// the events are kept and tried again, with a warning in the log.
+const backgroundApproval = "untrusted"
+
+// processApproval is the approval policy set for the app-server process.
+const processApproval = "on-request"
 
 // background is the user's choice for background turns, in the
 // connector's settings directory (background.json).
@@ -104,6 +123,21 @@ var errThreadInUse = errors.New("another Codex process has the thread loaded")
 // kept for the next try.
 var errTurnFailed = errors.New("the turn failed")
 
+// errApprovalRefused: Codex refused backgroundApproval in a request (a
+// version that dropped it). The turn fails (errTurnFailed) rather than run
+// with a looser policy, so its events are kept and tried again.
+var errApprovalRefused = errors.New("Codex refused the background turn's approval policy (" + backgroundApproval + ")")
+
+// refusedApproval: err is Codex refusing a request's approvalPolicy.
+func refusedApproval(err error) bool {
+	var re *rpcError
+	if !errors.As(err, &re) {
+		return false
+	}
+	m := strings.ToLower(re.Message)
+	return strings.Contains(m, backgroundApproval) || strings.Contains(m, "approvalpolicy") || strings.Contains(m, "approval_policy")
+}
+
 // backgroundTurn is one background turn's request.
 type backgroundTurn struct {
 	Thread  string
@@ -119,9 +153,10 @@ func AppServerTurn(bin string) func(ctx context.Context, t backgroundTurn) error
 		if !uuidRE.MatchString(t.Thread) {
 			return errors.New("not a Codex thread ID")
 		}
-		// The sandbox and approvals are set for the process too, so the
-		// user's config.toml (danger-full-access, say) can't widen them.
-		cmd := exec.Command(bin, "-c", fmt.Sprintf("sandbox_mode=%q", t.Sandbox), "-c", `approval_policy="never"`,
+		// The sandbox and approval policy are set for the process too, so
+		// the user's config.toml can't change them: not widen the sandbox
+		// (danger-full-access, say), nor turn approvals off.
+		cmd := exec.Command(bin, "-c", fmt.Sprintf("sandbox_mode=%q", t.Sandbox), "-c", fmt.Sprintf("approval_policy=%q", processApproval),
 			"app-server", "--listen", "stdio://")
 		if t.Cwd != "" {
 			if st, err := os.Stat(t.Cwd); err == nil && st.IsDir() {
@@ -212,8 +247,8 @@ func (s *stdioServer) handle(line []byte) {
 	}
 	switch {
 	case m.ID != nil && m.Method != "":
-		// An approval or question: nobody is here to answer (approvals are
-		// off, so none should come).
+		// An approval or question: nobody is here to answer, so it's
+		// refused and what asked fails closed (backgroundApproval).
 		s.send(map[string]any{"id": m.ID, "error": map[string]any{"code": -32601, "message": "the Wakeshift connector can't answer interactive requests"}})
 	case m.ID != nil:
 		var id int64
@@ -266,17 +301,23 @@ func (s *stdioServer) turn(ctx context.Context, t backgroundTurn) error {
 	if err := s.send(map[string]any{"method": "initialized"}); err != nil {
 		return err
 	}
-	resume := map[string]any{"threadId": t.Thread, "sandbox": t.Sandbox, "approvalPolicy": "never", "excludeTurns": true}
+	resume := map[string]any{"threadId": t.Thread, "sandbox": t.Sandbox, "approvalPolicy": backgroundApproval, "excludeTurns": true}
 	if _, err := s.call(ctx, "thread/resume", resume); err != nil {
 		if strings.Contains(err.Error(), "active writer") {
 			return errThreadInUse
 		}
+		if refusedApproval(err) {
+			return fmt.Errorf("%w: %w: thread/resume: %v", errTurnFailed, errApprovalRefused, err)
+		}
 		return fmt.Errorf("codex app-server: thread/resume: %w", err)
 	}
 	r, err := s.call(ctx, "turn/start", map[string]any{"threadId": t.Thread, "input": []any{},
-		"approvalPolicy": "never", "sandboxPolicy": sandboxPolicy(t.Sandbox),
+		"approvalPolicy": backgroundApproval, "sandboxPolicy": sandboxPolicy(t.Sandbox),
 		"toolOutput": map[string]any{"name": "wakeshift_event", "output": t.Output}})
 	if err != nil {
+		if refusedApproval(err) {
+			return fmt.Errorf("%w: %w: turn/start: %v", errTurnFailed, errApprovalRefused, err)
+		}
 		return fmt.Errorf("%w: turn/start: %v", errTurnFailed, err)
 	}
 	var started struct {

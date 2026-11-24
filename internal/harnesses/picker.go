@@ -6,7 +6,7 @@ import (
 )
 
 // What the apps' "connect your agent" pickers say about each agent
-// (apps/agentpicker renders it; `make agent-picker` regenerates the copies).
+// (apps/agentpicker renders it, from copies generated from this file).
 // The commands were checked against each harness's own CLI. Public copy: what happens and what to do, never how the
 // listener works.
 //

@@ -30,6 +30,7 @@ import (
 
 	"github.com/wakeshift/server/internal/appkey"
 	"github.com/wakeshift/server/internal/jws"
+	"github.com/wakeshift/server/internal/orgs"
 )
 
 // Config registers an app (from WAKESHIFT_APPS).
@@ -71,7 +72,25 @@ type App struct {
 	KeyID   string `json:"-"`
 	KeyName string `json:"-"`
 
-	owned bool // a console app (it has an owner)
+	owned   bool      // a console app (it has an owner)
+	keyRole orgs.Role // the signing key's maker's role when they made it (KeyMay)
+}
+
+// KeyMay says whether the key that signed the request may do a through the
+// app API: for a console app, only if the role of the member who made or
+// registered the key, when they did, allows a (orgs/roles.go), so a key a
+// developer made can't do what only owners and admins may (users/forget).
+// A key whose maker's role is unknown (they've left; or a key the previous
+// revision made during a deploy) may do only what every role may. A
+// WAKESHIFT_APPS app has no organization: its operator holds its keys.
+func (a App) KeyMay(act orgs.Action) bool {
+	if !a.owned {
+		return true
+	}
+	if a.keyRole == "" {
+		return orgs.Developer.Can(act)
+	}
+	return a.keyRole.Can(act)
 }
 
 // Manifest is what an app may do.
@@ -100,8 +119,7 @@ type Manifest struct {
 	// tool that deletes, spends, or reaches anyone the user hasn't already
 	// chosen. When a user connects an agent program that has exact
 	// per-tool rules (Claude Code, Cursor CLI), Wakeshift offers to allow
-	// these, by name, in the same question as the install
-	// (docs/harnesses.md, "Pre-approving an app's own tools").
+	// these, by name, in the same question as the install.
 	PreapproveTools []string `json:"preapprove_tools,omitempty"`
 }
 
@@ -162,8 +180,7 @@ var (
 const (
 	AccountsApp = "app"
 	// AccountsWakeshift was account mode (Sign in with Wakeshift: an app
-	// with grants in people's own workspaces), turned off in October 2026.
-	// A manifest can't ask for it.
+	// with grants in people's own workspaces), now turned off. A manifest can't ask for it.
 	AccountsWakeshift = "wakeshift"
 )
 
@@ -667,6 +684,14 @@ func (r *Registry) Authenticate(ctx context.Context, token string, now time.Time
 	if !ok {
 		return App{}, refusal("invalid assertion")
 	}
+	// What the token alone can show wrong is refused before any database
+	// work, so a made-up or stale token costs no query. These refusals
+	// depend only on what the caller sent (and the time), so answering
+	// them before the signature is checked tells it nothing about the
+	// apps or keys here.
+	if err := r.checkClaims(header, claims, now); err != nil {
+		return App{}, err
+	}
 	app, signer, err := r.signer(ctx, token, header, claims, now)
 	if err != nil {
 		return App{}, err
@@ -678,18 +703,8 @@ func (r *Registry) Authenticate(ctx context.Context, token string, now time.Time
 	}
 	// signer verified the signature over the header and claims read above.
 	a, kid := claims, appkey.KeyID(signer.public)
-	switch {
-	case !(a.Issuer == app.ID && a.Subject == app.ID) && !(header.Kid != "" && a.Issuer == kid && a.Subject == kid):
+	if !(a.Issuer == app.ID && a.Subject == app.ID) && !(header.Kid != "" && a.Issuer == kid && a.Subject == kid) {
 		return App{}, refusal("assertion issuer and subject must be the app")
-	case a.Audience != r.AssertionAudience():
-		return App{}, refusal("assertion is for another audience")
-	case now.Unix() >= a.Expires || a.Expires-a.IssuedAt > int64(maxAssertionLife.Seconds()) || a.IssuedAt > now.Add(time.Minute).Unix():
-		return App{}, refusal("assertion expired or too long-lived")
-	case a.ID == "":
-		return App{}, refusal("assertion needs a jti")
-	}
-	if len(a.ID) > 200 {
-		return App{}, refusal("assertion's jti is too long")
 	}
 	first, err := r.firstUse(ctx, app.ID, a.ID, time.Unix(a.Expires, 0))
 	if err != nil {
@@ -698,7 +713,7 @@ func (r *Registry) Authenticate(ctx context.Context, token string, now time.Time
 	if !first {
 		return App{}, refusal("assertion already used")
 	}
-	app.KeyID, app.KeyName = signer.id, signer.name
+	app.KeyID, app.KeyName, app.keyRole = signer.id, signer.name, signer.role
 	if err := r.markKeyUsed(ctx, app, signer, now); err != nil {
 		// The request is fine; the next one tries again.
 		slog.Error("apps: recording a key's use", "app", app.ID, "err", err)
@@ -799,7 +814,31 @@ func (r *Registry) unknownKey() error {
 	return refusal("invalid assertion: this key isn't one of " + host + "'s; if it came from another console, set WAKESHIFT_CORE to its address")
 }
 
-// unverified reads a token's header and claims without verifying them.
+// checkClaims refuses an assertion for what its header and claims show
+// without its key: not an app+jwt signed with EdDSA, a signature that
+// can't be one, an issuer that isn't its subject (Authenticate wants both
+// the app or both the kid), another audience, expired or too long-lived,
+// or no usable jti.
+func (r *Registry) checkClaims(h jws.Header, a Assertion, now time.Time) error {
+	switch {
+	case h.Alg != "EdDSA" || h.Typ != "app+jwt":
+		return refusal("invalid assertion")
+	case a.Issuer != a.Subject:
+		return refusal("assertion issuer and subject must be the app")
+	case a.Audience != r.AssertionAudience():
+		return refusal("assertion is for another audience")
+	case now.Unix() >= a.Expires || a.Expires-a.IssuedAt > int64(maxAssertionLife.Seconds()) || a.IssuedAt > now.Add(time.Minute).Unix():
+		return refusal("assertion expired or too long-lived")
+	case a.ID == "":
+		return refusal("assertion needs a jti")
+	case len(a.ID) > 200:
+		return refusal("assertion's jti is too long")
+	}
+	return nil
+}
+
+// unverified reads a token's header and claims without verifying them, and
+// refuses one whose signature isn't an Ed25519 signature's size.
 func unverified(token string) (jws.Header, Assertion, bool) {
 	var h jws.Header
 	var a Assertion
@@ -809,6 +848,9 @@ func unverified(token string) (jws.Header, Assertion, bool) {
 	}
 	hb, err := base64.RawURLEncoding.DecodeString(parts[0])
 	if err != nil || json.Unmarshal(hb, &h) != nil || len(h.Kid) > 100 {
+		return h, a, false
+	}
+	if sig, err := base64.RawURLEncoding.DecodeString(parts[2]); err != nil || len(sig) != ed25519.SignatureSize {
 		return h, a, false
 	}
 	b, err := base64.RawURLEncoding.DecodeString(parts[1])

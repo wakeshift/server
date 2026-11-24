@@ -9,9 +9,9 @@ import "time"
 // session start Claude with the same command line (ClaudeStreaming), but
 // the SDK closes Claude's stdin once a one-shot query has its result, and
 // an open session keeps it open between turns. Once its input has ended,
-// Claude Code (runHeadless) waits up to 30 s, hard-coded, for its
-// background asyncRewake hooks before it exits: a waiter still listening
-// then holds the exit for those 30 s. So a waiter in a streaming session
+// Claude Code has been observed to wait about 30 s for its background
+// asyncRewake hooks before it exits: a waiter still listening then holds
+// the exit that long. So a waiter in a streaming session
 // watches Claude's fd 0 and stops, taking nothing, once its writer has
 // closed it: Claude can't start another turn from its input then (a
 // handover to it would be a turn the one-shot never runs).

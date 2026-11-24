@@ -193,7 +193,7 @@ var claudeID = regexp.MustCompile(`^[0-9A-Za-z_-]{1,64}$`)
 // (its calls, their results and their mcpMeta), whose hooks get the
 // session's transcript_path and session_id with the subagent's agent_id:
 // <the session transcript's folder>/<session>/subagents/agent-<agent_id>.jsonl
-// (2.1.280 and 2.1.321, verified November 11, 2026). Its lines carry the
+// (observed with 2.1.280 and 2.1.321). Its lines carry the
 // session's sessionId. "" if the path or an ID doesn't fit.
 func claudeSubagentTranscript(path, session, agent string) string {
 	if path == "" || !filepath.IsAbs(path) || filepath.Ext(path) != ".jsonl" || !claudeID.MatchString(session) || !claudeID.MatchString(agent) {
@@ -473,10 +473,8 @@ func (claudeFormat) Continue(in Input, text string) (Output, bool) {
 // line to reach the transcript. Claude Code 2.1.321 writes it once the
 // model's next request is under way: usually within a few seconds of the
 // hook starting, occasionally later, and past 3s now and then with some
-// models. Until November 11,
-// 2026 the hook waited 3s and gave up on a result written later: no
-// redeem, so the conversation was never woken, which happened to a
-// sizable share of the plugin's subscribes. The hook is async, so the
+// models. A hook that waited only 3s gave up on a result written later:
+// no redeem, so the conversation was never woken. The hook is async, so the
 // wait holds up nothing; it stays under the hook's timeout (30s: the plugin's
 // hooks.json, claudeInstaller). A result missed all the same is redeemed
 // by the conversation's waiter (missedRedeem).

@@ -229,9 +229,7 @@ func TestMCPEventsGap(t *testing.T) {
 // The retry window ends retries too, before MaxAttempts.
 func TestMCPEventsRetryWindow(t *testing.T) {
 	c, app, _, cb, _ := eventsConversation(t, false)
-	w := mcpevents.RetryWindow
-	mcpevents.RetryWindow = time.Millisecond
-	t.Cleanup(func() { mcpevents.RetryWindow = w })
+	t.Cleanup(mcpevents.SetRetryWindow(time.Millisecond))
 	cb.status = func(n int) int { return 503 }
 	publish(t, c, app, "late")
 	waitFor(t, "the gap envelope", func() bool { return len(cb.envelopes()) == 1 })

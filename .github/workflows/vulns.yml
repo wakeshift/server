@@ -1,17 +1,23 @@
 name: Vulnerabilities
 
-# Known vulnerabilities in what the server ships: its Go (govulncheck, which
-# reports only what the code can reach) and the console's production npm
-# dependencies, at high or critical. On a pull request that changes code or
-# dependencies; weekly on main, for advisories published since.
+# Known vulnerabilities in what this repository ships and runs: its Go
+# (govulncheck, which reports only what the code can reach), the console's
+# production npm dependencies, the TypeScript SDK's and the harness runner's
+# npm dependencies (all of them: the SDK's are dev dependencies, and both
+# run on your machine for make bench-test), at high or critical, and the
+# Python SDK's locked dependencies (its extras included). On a pull request
+# that changes code or dependencies; weekly on main, for advisories
+# published since.
 on:
   pull_request:
     paths:
       - '**/*.go'
       - go.mod
       - go.sum
-      - web/package.json
-      - web/package-lock.json
+      - '**/package.json'
+      - '**/package-lock.json'
+      - sdk/python/pyproject.toml
+      - sdk/python/uv.lock
       - .github/workflows/vulns.yml
   schedule:
     - cron: '17 6 * * 1'
@@ -31,6 +37,8 @@ jobs:
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version-file: go.mod
@@ -38,15 +46,42 @@ jobs:
         run: go run golang.org/x/vuln/cmd/govulncheck@v1.9.0 ./...
 
   npm:
-    name: npm audit (console, production, high and up)
+    name: npm audit (high and up)
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: 26
-      # From the lockfile: nothing is installed.
+      # From the lockfiles: nothing is installed.
       - name: npm audit
-        working-directory: web
-        run: npm audit --omit=dev --audit-level=high
+        run: |
+          status=0
+          audit() {
+            echo "::group::$*"
+            (cd "$1" && shift && npm audit --audit-level=high "$@") || status=1
+            echo "::endgroup::"
+          }
+          audit web --omit=dev
+          audit sdk/typescript
+          audit bench
+          exit $status
+
+  python:
+    name: pip-audit (Python SDK)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
+      # From the lockfile, every extra included, checked against its hashes.
+      - name: pip-audit
+        working-directory: sdk/python
+        run: |
+          uv export --frozen --no-dev --all-extras --no-emit-project -o "$RUNNER_TEMP/requirements.txt"
+          uvx pip-audit==2.10.1 --disable-pip --require-hashes -r "$RUNNER_TEMP/requirements.txt"

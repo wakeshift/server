@@ -110,7 +110,8 @@ const (
 	CodeUpdateRequired websocket.StatusCode = 4002
 )
 
-// maxAcksPerSecond bounds the database work one connection can cause.
+// maxAcksPerSecond bounds the database work one connection can cause: the
+// frames a client sends a second, acks or anything else.
 const maxAcksPerSecond = 200
 
 // Server serves GET /v1/stream (WebSocket, SSE or lines), and with
@@ -199,6 +200,10 @@ type Server struct {
 	connsMu     sync.Mutex // orders entering (conns.Add) before Drain's Wait
 	drain       chan struct{}
 	conns       sync.WaitGroup
+
+	// streamsByApp: the other streams and polls held now for an app's
+	// links and waits (enterApp), under connsMu.
+	streamsByApp map[string]int
 }
 
 // claims is what a link's URL carries: a signed reference to its row.
@@ -289,11 +294,18 @@ type NewLink struct {
 // For a link with Slide, the time is its token's expiry (it expires sooner
 // if it isn't used).
 func (s *Server) Mint(ctx context.Context, tx pgx.Tx, tenant string, n NewLink) (string, time.Time, error) {
+	_, u, exp, err := s.MintID(ctx, tx, tenant, n)
+	return u, exp, err
+}
+
+// MintID is Mint, also returning the link's ID (for an audit entry, which
+// names the link by its ID, never its URL).
+func (s *Server) MintID(ctx context.Context, tx pgx.Tx, tenant string, n NewLink) (id, url string, exp time.Time, err error) {
 	l, err := mint(ctx, tx, n)
 	if err != nil {
-		return "", time.Time{}, err
+		return "", "", time.Time{}, err
 	}
-	return s.urlOf(tenant, l), l.expiry(), nil
+	return l.ID, s.urlOf(tenant, l), l.expiry(), nil
 }
 
 // mint records a link in the transaction's tenant (Mint), returning it.
@@ -740,6 +752,73 @@ func (s *Server) leave() {
 	s.conns.Done()
 }
 
+// An app's share of an instance's MaxStreams, for the streams and polls on
+// links an app made and its wait tool's (push streams have their own,
+// PushAppShare): an app holding AppShare of MaxStreams or more gets
+// another only while the instance has more than AppReserve of it free. So
+// one app's users (or one app minting links) can't take every place: the
+// last AppReserve is kept for the other apps and for agents' own links,
+// while an app alone on a quiet instance isn't held to its share.
+const (
+	AppShare   = 0.25
+	AppReserve = 0.25
+)
+
+// appCaps are an instance's per-app share and reserve for maxStreams (0:
+// none).
+func appCaps(maxStreams int) (share, reserve int) {
+	if maxStreams <= 0 {
+		return 0, 0
+	}
+	return max(int(float64(maxStreams)*AppShare), 1), max(int(float64(maxStreams)*AppReserve), 1)
+}
+
+// enterApp counts a stream or poll enter let in as app's ("": none, not
+// counted), unless app holds its share (AppShare) and the instance has no
+// more than AppReserve free (errBusy, refused as key, as enter refuses);
+// call s.leaveApp(app) when it ends, before s.leave.
+func (s *Server) enterApp(key, app string) error {
+	if app == "" {
+		return nil
+	}
+	s.connsMu.Lock()
+	defer s.connsMu.Unlock()
+	share, reserve := appCaps(s.MaxStreams)
+	// active counts this one already (enter): refused if the others leave
+	// no more than the reserve.
+	if s.MaxStreams > 0 && s.streamsByApp[app] >= share && s.active.Load()-1 >= int64(s.MaxStreams-reserve) {
+		slog.Warn("streams: an app's streams past their share of a busy instance", "app", app, "app_streams", s.streamsByApp[app],
+			"app_share", share, "active", s.active.Load())
+		return busyError{after: s.refusals.refused(key, time.Now())}
+	}
+	if s.streamsByApp == nil {
+		s.streamsByApp = map[string]int{}
+	}
+	s.streamsByApp[app]++
+	return nil
+}
+
+// leaveApp counts out a stream enterApp counted in as app's.
+func (s *Server) leaveApp(app string) {
+	if app == "" {
+		return
+	}
+	s.connsMu.Lock()
+	if s.streamsByApp[app]--; s.streamsByApp[app] <= 0 {
+		delete(s.streamsByApp, app)
+	}
+	s.connsMu.Unlock()
+}
+
+// linkApp is the app that made l ("app:<id>"), or "" for an agent's own
+// link (the console's, a user's).
+func linkApp(l Link) string {
+	if app, ok := strings.CutPrefix(l.CreatedBy, "app:"); ok {
+		return app
+	}
+	return ""
+}
+
 // Active is how many connections and long polls this instance holds.
 func (s *Server) Active() int64 { return s.active.Load() }
 
@@ -819,6 +898,13 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "try again", http.StatusServiceUnavailable)
 		return
 	}
+	// An app's link: within the app's share of the instance (enterApp).
+	app := linkApp(l)
+	if err := s.enterApp("link:"+c.ID, app); err != nil {
+		turnAway(w, err)
+		return
+	}
+	defer s.leaveApp(app)
 	if format != "" {
 		t := newHTTPTransport(w, format)
 		t.acks = l.Ack
@@ -2073,19 +2159,21 @@ func (st *stream) readAcks(ctx context.Context, cancel context.CancelFunc, c *we
 		if err != nil {
 			return
 		}
-		var m struct {
-			Type       string `json:"type"`
-			DeliveryID string `json:"delivery_id"`
-		}
-		if json.Unmarshal(b, &m) != nil || m.Type != "ack" || m.DeliveryID == "" {
-			continue
-		}
+		// Every frame counts, acks or not: reading and parsing one is work
+		// too.
 		if time.Since(window) > time.Second {
 			window, count = time.Now(), 0
 		}
 		if count++; count > maxAcksPerSecond {
 			st.t.end(endTooManyAcks, endingTooMany)
 			return
+		}
+		var m struct {
+			Type       string `json:"type"`
+			DeliveryID string `json:"delivery_id"`
+		}
+		if json.Unmarshal(b, &m) != nil || m.Type != "ack" || m.DeliveryID == "" {
+			continue
 		}
 		var acked bool
 		err = st.tx(ctx, func(tx pgx.Tx) (err error) {

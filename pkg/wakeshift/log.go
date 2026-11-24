@@ -1,6 +1,6 @@
 package wakeshift
 
-// What the SDK logs (design §2.11): every line has a code, from one list
+// What the SDK logs: every line has a code, from one list
 // shared by the three SDKs (warnings.json), at a fixed level, with the
 // code's fix in its message. Misuse logs once per client; failures that
 // can repeat (identify_error, user_required, authorize_failed, key_refused,

@@ -126,9 +126,20 @@ func roleCan(r orgs.Role, org string) string {
 	return ""
 }
 
-// inviteMail is an invite's email.
+// inviteSubject is every invite email's subject: fixed, so no member's
+// text reaches an inbox list (mailsafe.go).
+const inviteSubject = "You're invited to an organization on Wakeshift"
+
+// inviteMail is an invite's email. It names the inviter by their email
+// address, and the organization only if its name can't read as a link
+// (mailName); the subject and preheader carry neither.
 func inviteMail(s orgs.Sent, link string) mail.Message {
-	from, org := oneLine(s.From), oneLine(s.OrgName)
+	from := oneLine(s.From)
+	org, heading, button := "an organization", "Join an organization on Wakeshift", "Join the organization"
+	can := "the organization"
+	if name := mailName(s.OrgName); name != "" {
+		org, heading, button, can = name, "Join "+name+" on Wakeshift", "Join "+name, name
+	}
 	role := string(s.Invite.Role)
 	article := "a"
 	if role == "owner" || role == "admin" {
@@ -136,17 +147,16 @@ func inviteMail(s orgs.Sent, link string) mail.Message {
 	}
 	expires := s.Invite.ExpiresAt.UTC().Format("2 January 2006")
 	invited := fmt.Sprintf("%s invited you to join %s on Wakeshift as %s %s.", from, org, article, role)
-	if can := roleCan(s.Invite.Role, org); can != "" {
+	if can := roleCan(s.Invite.Role, can); can != "" {
 		invited += fmt.Sprintf(" As %s %s, you can %s.", article, role, can)
 	}
-	subject := from + " invited you to join " + org + " on Wakeshift"
 	r := email.Render(email.Wakeshift, email.Email{
-		Subject:   subject,
-		Preheader: fmt.Sprintf("Join %s as %s %s. The link works until %s.", org, article, role, expires),
+		Subject:   inviteSubject,
+		Preheader: fmt.Sprintf("Join as %s %s. The link works until %s.", article, role, expires),
 		Kicker:    "Invitation",
-		Heading:   "Join " + org + " on Wakeshift",
+		Heading:   heading,
 		Body:      []string{invited},
-		Button:    email.Button{Label: "Join " + org, URL: link},
+		Button:    email.Button{Label: button, URL: link},
 		Notes: []string{
 			fmt.Sprintf("The link works once, only for %s, until %s. You accept by signing in with Google or GitHub. "+
 				"Wakeshift never asks for your password.", s.Invite.Email, expires),
@@ -154,7 +164,7 @@ func inviteMail(s orgs.Sent, link string) mail.Message {
 		},
 		Reason: from + " sent this invite from the Wakeshift console.",
 	})
-	return mail.Message{To: s.Invite.Email, Subject: subject, Text: r.Text, HTML: r.HTML}
+	return mail.Message{To: s.Invite.Email, Subject: inviteSubject, Text: r.Text, HTML: r.HTML}
 }
 
 func (a *API) revokeInvite(w http.ResponseWriter, r *http.Request) {

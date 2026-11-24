@@ -16,8 +16,7 @@ import (
 // No installer prints a terms notice: an app's own terms carry the
 // Connector Terms and the Privacy Policy to its users (Terms of Service
 // Section 6.6), and a Hermes install through Hermes's own command shows
-// none either. The signed release (WriteRelease, cmd/wakeshift-installers)
-// is checked too.
+// none either. The signed release (WriteRelease) is checked too.
 func TestInstallersPrintNoTermsNotice(t *testing.T) {
 	dir := t.TempDir()
 	platform := runtime.GOOS + "-" + runtime.GOARCH

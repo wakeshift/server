@@ -8,6 +8,12 @@ type Role string
 // Roles. Owners and admins manage people; owners alone manage owners and
 // admins, and can delete the organization. Developers do the day-to-day
 // work on apps, keys included, and read everything.
+//
+// A key carries its maker's role: each app key records the role of the
+// member who made or registered it, when they did, and through the app API
+// (/api/apps/v1) it may do only what that role may here (apps.App.KeyMay).
+// So a developer's key can't forget a user, as the developer can't in the
+// console; an owner's or admin's can.
 const (
 	Owner     Role = "owner"
 	Admin     Role = "admin"
@@ -26,9 +32,10 @@ const (
 	AppCreate          Action = "app.create"           // register an app in the organization
 	AppUpdate          Action = "app.update"           // Settings: name, MCP URL
 	AppDelete          Action = "app.delete"           // irreversible: its users' data goes
-	AppKeys            Action = "app.keys"             // make, rename, rotate and revoke keys
+	AppKeys            Action = "app.keys"             // make, rename, rotate and revoke keys (each key carries its maker's role)
+	AppLinkKey         Action = "app.link_key"         // add a key from @wakeshift/cli's link to an app that exists (a link can be someone else's)
 	AppEndSubscription Action = "app.end_subscription" // end one of its subscriptions
-	AppForgetUser      Action = "app.forget_user"      // irreversible: the user's workspace goes
+	AppForgetUser      Action = "app.forget_user"      // irreversible: the user's workspace goes; console, or a key an owner or admin made
 	AppPublishURLs     Action = "app.publish_urls"     // make and revoke publish URLs
 )
 
@@ -52,6 +59,7 @@ var can = map[Action][]Role{
 	AppUpdate:          {Owner, Admin},
 	AppDelete:          {Owner, Admin},
 	AppKeys:            {Owner, Admin, Developer},
+	AppLinkKey:         {Owner, Admin},
 	AppEndSubscription: {Owner, Admin, Developer},
 	AppForgetUser:      {Owner, Admin},
 	AppPublishURLs:     {Owner, Admin, Developer},

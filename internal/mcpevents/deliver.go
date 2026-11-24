@@ -2,6 +2,7 @@ package mcpevents
 
 import (
 	"bytes"
+	"cmp"
 	"context"
 	"crypto/rand"
 	"encoding/hex"
@@ -9,6 +10,7 @@ import (
 	"errors"
 	"log/slog"
 	"net/http"
+	"slices"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -60,12 +62,30 @@ type Deliverer struct {
 // sendSlots is how many webhooks an instance sends to at once: a slow
 // callback holds up only its own webhook. Of them, one app takes at most
 // appSends, and one workspace (one of the app's users) at most
-// workspaceSends, so a few slow callbacks can't take every slot: the other
-// apps' and workspaces' webhooks are claimed and sent meanwhile.
+// workspaceSends, and the apps one account made at most ownerSends, so a
+// few slow callbacks can't take every slot: the other apps' and
+// workspaces' webhooks are claimed and sent meanwhile.
+//
+// So that several apps (one account's, say) can't take them all either:
+//   - the last reserveSlots are for apps sending to fewer than lightSends
+//     webhooks, so an app with little to send finds a slot at once, even
+//     while a few busy apps hold the rest;
+//   - while an app holding fewer slots waits for one, an app doesn't take
+//     another: a slot that frees goes to the apps holding fewest, so the
+//     slots end up shared evenly between the apps that want them
+//     (shares.give hands the waiting back in that order, each app's
+//     oldest first, round the apps);
+//   - an app whose callbacks keep answering slowly (slowSend, on average)
+//     takes at most slowAppSends.
 const (
 	sendSlots      = 32
 	appSends       = 8
+	ownerSends     = 12
 	workspaceSends = 4
+	reserveSlots   = 8
+	lightSends     = 2
+	slowAppSends   = 4
+	slowSend       = 3 * time.Second
 )
 
 // wakeWorkers is how many woken agents are claimed for at once, and
@@ -188,7 +208,14 @@ type wake struct {
 // deliverNow claims what's waiting for one agent's webhooks in one
 // workspace and sends it, without waiting for the sends to finish.
 func (d *Deliverer) deliverNow(ctx context.Context, w wake) {
+	started := time.Now()
 	got, gone, err := d.claim(ctx, w.tenant, w.agent)
+	if err == nil {
+		// What this claim didn't find room for waits again (take); what
+		// it didn't find at all no longer waits. A claim that failed
+		// settles nothing: what waited still does.
+		d.sends.settle(wake{tenant: w.tenant, agent: w.agent}, started)
+	}
 	if err != nil {
 		if ctx.Err() == nil {
 			slog.Warn("mcp events: claiming deliveries failed; trying again", "tenant", w.tenant, "err", err)
@@ -234,79 +261,227 @@ func (d *Deliverer) spawn(h hook, fn func()) {
 // freeSlot gives back h's send slot, and has the webhooks that found no slot
 // free (shares.take) looked at again.
 func (d *Deliverer) freeSlot(h hook) {
-	for _, w := range d.sends.give(h.tenant, h.appID) {
+	for _, w := range d.sends.giveAs(h.tenant, h.appID, h.owner) {
 		d.woken.add(w)
 	}
 }
 
 // shares counts the sends in flight on this instance, in all, for each app
-// and for each workspace, within sendSlots, appSends and workspaceSends.
-// A webhook is claimed only once its slot is taken (take); one that finds
-// its app, its workspace or every slot full is left unclaimed, and looked
-// at again when a send there ends (give), or by the next pass.
+// and for each workspace, within sendSlots, appSends and workspaceSends
+// (and the rules after them, at sendSlots). A webhook is claimed only once
+// its slot is taken (take); one that finds no slot it may take is left
+// unclaimed, its wake waiting, and is looked at again when a send that was
+// in its way ends (give), or by the next pass.
 type shares struct {
-	mu      sync.Mutex
-	all     int
-	byKey   map[string]int
-	waiting map[string]map[wake]bool // by what was full: allSlots, an app's key or a workspace's
+	mu    sync.Mutex
+	all   int
+	byKey map[string]int
+	// waiting is the wakes waiting for a slot, by what was full: allSlots,
+	// an app's key or a workspace's. A wait ends when its app takes a slot
+	// for it, or when a claim for its wake took nothing for it (settle).
+	waiting map[string]map[waiter]waited
+	seq     uint64
+	// slow is each app's recent send times (a moving average, seconds),
+	// while they're slow or the app sends.
+	slow map[string]float64
 }
+
+// waiter is a wake waiting for one of app's slots.
+type waiter struct {
+	w   wake
+	app string
+}
+
+// waited is a waiter's order (when it began waiting) and its last refusal.
+type waited struct {
+	since uint64
+	last  time.Time
+}
+
+// waitMemory is how long a wait that wasn't settled counts at most (an
+// instance's wake that was never claimed again).
+const waitMemory = 2 * time.Minute
 
 const allSlots = "*"
 
 func newShares() *shares {
-	return &shares{byKey: map[string]int{}, waiting: map[string]map[wake]bool{}}
+	return &shares{byKey: map[string]int{}, waiting: map[string]map[waiter]waited{}, slow: map[string]float64{}}
 }
 
 func appKey(app string) string          { return "app:" + app }
 func workspaceKey(tenant string) string { return "workspace:" + tenant }
 
-// take takes a send slot for one of app's webhooks in tenant, reporting
-// whether there was one; if not, w is woken when one there is given back.
-func (s *shares) take(tenant, app string, w wake) bool {
+// ownerKey is the key the slots of app, made by the account owner, are
+// counted under for ownerSends: the account's, or (owner "": an app no
+// account made) the app's alone. Each slot is given back under the owner
+// it was taken under (the claim's, carried in its hook), so nothing about
+// an app's owner is kept here to go stale.
+func ownerKey(app, owner string) string {
+	if owner != "" {
+		return "owner:" + owner
+	}
+	return "owner:app:" + app
+}
+
+// take is takeAs for an app no account made.
+func (s *shares) take(tenant, app string, w wake) bool { return s.takeAs(tenant, app, "", w) }
+
+// give is giveAs for an app no account made.
+func (s *shares) give(tenant, app string) []wake { return s.giveAs(tenant, app, "") }
+
+// takeAs takes a send slot for one of app's webhooks in tenant (app made by
+// the account owner), reporting whether there was one; if not, w is woken
+// when one there is given back.
+func (s *shares) takeAs(tenant, app, owner string, w wake) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	a, ws := appKey(app), workspaceKey(tenant)
+	now := time.Now()
+	a, ws, o := appKey(app), workspaceKey(tenant), ownerKey(app, owner)
+	held, most := s.byKey[a], appSends
+	if s.slow[app] >= slowSend.Seconds() {
+		most = slowAppSends
+	}
 	full := ""
 	switch {
 	case s.all >= sendSlots:
 		full = allSlots
-	case s.byKey[a] >= appSends:
+	case held >= lightSends && s.all >= sendSlots-reserveSlots:
+		full = allSlots
+	case held >= most:
 		full = a
+	case s.byKey[o] >= ownerSends:
+		full = o
 	case s.byKey[ws] >= workspaceSends:
 		full = ws
+	case held > 0 && s.fewerWait(held, now):
+		full = allSlots
 	}
+	me := waiter{w: w, app: app}
 	if full != "" {
 		if s.waiting[full] == nil {
-			s.waiting[full] = map[wake]bool{}
+			s.waiting[full] = map[waiter]waited{}
 		}
-		s.waiting[full][w] = true
+		was, ok := s.waiting[full][me]
+		if !ok {
+			s.seq++
+			was.since = s.seq
+		}
+		was.last = now
+		s.waiting[full][me] = was
 		return false
+	}
+	for k, m := range s.waiting {
+		if delete(m, me); len(m) == 0 {
+			delete(s.waiting, k)
+		}
 	}
 	s.all++
 	s.byKey[a]++
 	s.byKey[ws]++
+	s.byKey[o]++
 	return true
 }
 
-// give gives back a slot take took, returning the wakes now to be tried
-// again: those that found every slot, this app or this workspace full.
-func (s *shares) give(tenant, app string) []wake {
+// fewerWait reports whether a wake of an app holding fewer slots than
+// held waits for any slot.
+func (s *shares) fewerWait(held int, now time.Time) bool {
+	for wt, at := range s.waiting[allSlots] {
+		if s.byKey[appKey(wt.app)] < held && now.Sub(at.last) < waitMemory {
+			return true
+		}
+	}
+	return false
+}
+
+// giveAs gives back a slot takeAs took (with the same owner), returning the wakes now to be tried
+// again: those that found every slot, this app or this workspace full, the
+// apps holding fewest slots first and each app's in the order they began
+// waiting. They wait on until they get a slot or their claim settles.
+func (s *shares) giveAs(tenant, app, owner string) []wake {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.all--
-	var out []wake
-	for _, k := range []string{appKey(app), workspaceKey(tenant)} {
+	keys := []string{allSlots, appKey(app), workspaceKey(tenant), ownerKey(app, owner)}
+	for _, k := range keys[1:] {
 		if s.byKey[k]--; s.byKey[k] <= 0 {
 			delete(s.byKey, k)
 		}
 	}
-	for _, k := range []string{allSlots, appKey(app), workspaceKey(tenant)} {
-		for w := range s.waiting[k] {
-			out = append(out, w)
+	now := time.Now()
+	type next struct {
+		w     wake
+		held  int
+		since uint64
+	}
+	var list []next
+	seen := map[wake]int{}
+	for _, k := range keys {
+		for wt, at := range s.waiting[k] {
+			if now.Sub(at.last) >= waitMemory {
+				delete(s.waiting[k], wt)
+				continue
+			}
+			n := next{w: wt.w, held: s.byKey[appKey(wt.app)], since: at.since}
+			if i, ok := seen[wt.w]; ok {
+				if n.held < list[i].held || n.held == list[i].held && n.since < list[i].since {
+					list[i] = n
+				}
+				continue
+			}
+			seen[wt.w] = len(list)
+			list = append(list, n)
 		}
-		delete(s.waiting, k)
+		if len(s.waiting[k]) == 0 {
+			delete(s.waiting, k)
+		}
+	}
+	slices.SortFunc(list, func(x, y next) int {
+		if x.held != y.held {
+			return x.held - y.held
+		}
+		return cmp.Compare(x.since, y.since)
+	})
+	out := make([]wake, len(list))
+	for i, n := range list {
+		out[i] = n.w
 	}
 	return out
+}
+
+// settle ends w's waits that weren't refused again since started: a claim
+// for w that began then took what it could, and found nothing more
+// waiting for a slot.
+func (s *shares) settle(w wake, started time.Time) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for k, m := range s.waiting {
+		for wt, at := range m {
+			if wt.w == w && at.last.Before(started) {
+				delete(m, wt)
+			}
+		}
+		if len(m) == 0 {
+			delete(s.waiting, k)
+		}
+	}
+}
+
+// observe records how long one of app's sends took: an app whose sends
+// take slowSend or longer on average takes at most slowAppSends.
+func (s *shares) observe(app string, took time.Duration) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	t := took.Seconds()
+	avg, ok := s.slow[app]
+	if !ok {
+		avg = t
+	}
+	avg = 0.7*avg + 0.3*t
+	if avg < slowSend.Seconds()/4 {
+		delete(s.slow, app) // fast: forgotten (an unknown app starts from its first send)
+		return
+	}
+	s.slow[app] = avg
 }
 
 // wakeQueue is the set of notified agents not yet claimed for. One is with
@@ -387,6 +562,7 @@ type hook struct {
 	handle, agent   string
 	session         string
 	appID           string
+	owner           string // the account that made the app ("": none; ownerKey)
 	app             string // its display name
 	dialect         string
 	event           string // the event type it's subscribed to
@@ -497,6 +673,7 @@ type webhookRow struct {
 	Since                                *time.Time
 	RetryDelivery                        *string // the delivery Attempts and Since are for
 	Event, Ending                        string
+	Owner                                string // the account that made the app ("": none)
 }
 
 // claim takes the workspace's webhooks (only agent's, if it's set) that
@@ -519,10 +696,10 @@ func (d *Deliverer) claim(ctx context.Context, tenant, agent string) (out []clai
 	defer func() {
 		if err != nil {
 			for _, c := range out {
-				again = append(again, d.sends.give(tenant, c.appID)...)
+				again = append(again, d.sends.giveAs(tenant, c.appID, c.owner)...)
 			}
 			for _, e := range gone {
-				again = append(again, d.sends.give(tenant, e.appID)...)
+				again = append(again, d.sends.giveAs(tenant, e.appID, e.owner)...)
 			}
 			out, gone = nil, nil
 		}
@@ -546,20 +723,20 @@ func (d *Deliverer) claim(ctx context.Context, tenant, agent string) (out []clai
 			return err
 		}
 		for _, w := range list {
-			if !d.sends.take(tenant, w.App, wake{tenant: tenant, agent: w.Agent}) {
+			if !d.sends.takeAs(tenant, w.App, w.Owner, wake{tenant: tenant, agent: w.Agent}) {
 				continue // no slot free: left as it is, to be looked at again
 			}
 			c, e, err := d.claimOne(ctx, tx, tenant, w)
 			switch {
 			case err != nil:
-				again = append(again, d.sends.give(tenant, w.App)...)
+				again = append(again, d.sends.giveAs(tenant, w.App, w.Owner)...)
 				return err
 			case e != nil:
 				gone = append(gone, *e)
 			case c != nil:
 				out = append(out, *c)
 			default:
-				again = append(again, d.sends.give(tenant, w.App)...)
+				again = append(again, d.sends.giveAs(tenant, w.App, w.Owner)...)
 			}
 		}
 		return nil
@@ -573,7 +750,7 @@ func (d *Deliverer) claim(ctx context.Context, tenant, agent string) (out []clai
 // what's waiting. Neither (nil, nil): nothing to send, or its secret is
 // unreadable.
 func (d *Deliverer) claimOne(ctx context.Context, tx pgx.Tx, tenant string, w webhookRow) (*claimed, *ended, error) {
-	h := hook{tenant: tenant, id: w.ID, url: w.URL, handle: w.Handle, agent: w.Agent, session: w.Session, appID: w.App, app: w.AppName, dialect: w.Dialect,
+	h := hook{tenant: tenant, id: w.ID, url: w.URL, handle: w.Handle, agent: w.Agent, session: w.Session, appID: w.App, owner: w.Owner, app: w.AppName, dialect: w.Dialect,
 		event: w.Event}
 	secret, err := d.Seal.open(w.ID, w.Secret)
 	if err != nil {
@@ -724,6 +901,7 @@ func (d *Deliverer) send(ctx context.Context, c claimed) (finished bool) {
 		}
 		if err == nil {
 			sent, err = Send(ctx, d.Client, c.url, c.id, msgID, body, d.now(), c.secrets...)
+			d.sends.observe(c.appID, time.Since(began))
 		}
 		took := time.Since(began)
 		if ctx.Err() != nil {
@@ -754,7 +932,7 @@ func (d *Deliverer) send(ctx context.Context, c claimed) (finished bool) {
 		default:
 			o, why = retry, category
 		}
-		if o == retry && (c.attempts+1 >= MaxAttempts || c.since != nil && d.now().Sub(*c.since) >= RetryWindow) {
+		if o == retry && (c.attempts+1 >= MaxAttempts || c.since != nil && d.now().Sub(*c.since) >= RetryWindow()) {
 			o, gap = abandoned, true
 		}
 		// Recorded whatever happens to ctx now: the attempt happened.
@@ -982,7 +1160,7 @@ var pruneWebhooksSQL = `WITH gone AS (DELETE FROM mcp_event_webhooks w WHERE w.e
 var dueWebhooksSQL = `SELECT w.id, w.app_id, w.agent_id, w.session_id::text, w.session_handle, w.url, w.secret,
 			coalesce(w.previous_secret, ''::bytea), coalesce(w.previous_until > now(), false), a.name, w.dialect,
 			w.authorized_at < now() - $1::interval, w.replay_after, w.replay_through, w.retry_attempts, w.retrying_since, w.retry_delivery_id::text,
-			w.name, coalesce(w.ending_reason, '')
+			w.name, coalesce(w.ending_reason, ''), coalesce(a.created_by::text, '')
 			FROM mcp_event_webhooks w JOIN apps a ON a.id = w.app_id
 			WHERE (w.busy_until IS NULL OR w.busy_until < now())
 				AND (w.next_attempt_at IS NULL OR w.next_attempt_at <= now() OR w.ending_reason IS NOT NULL)

@@ -100,6 +100,8 @@ export const can = {
   updateApp: (r?: Role) => r === 'owner' || r === 'admin',
   deleteApp: (r?: Role) => r === 'owner' || r === 'admin',
   forgetUser: (r?: Role) => r === 'owner' || r === 'admin',
+  // linkKey: add @wakeshift/cli's key, from its link, to an app that exists.
+  linkKey: (r?: Role) => r === 'owner' || r === 'admin',
   renameOrg: (r?: Role) => r === 'owner' || r === 'admin',
   deleteOrg: (r?: Role) => r === 'owner',
   invite: (r?: Role) => r === 'owner' || r === 'admin',

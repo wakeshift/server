@@ -116,7 +116,7 @@ The version each harness's wake path was verified on, against the real binary: i
 | Claude Cowork | Claude desktop, November 2026 | `claude-ai` (shared with claude.ai chat) | Real app, assisted |
 | Cursor | cursor-agent 2026.10.22; IDE 3.25.9 | `Cursor`, `cursor-vscode` | Real binary and model (CLI); IDE from its docs |
 | GitHub Copilot CLI | 1.0.105 | `copilot-cli` | Real binary and model |
-| opencode | 1.19.3 | `opencode` | Real binary, free model |
+| opencode | 1.19.5 | `opencode` | Real binary, free model |
 | pi | 1.5.0 | `pi` | Real binary and model |
 | Antigravity CLI | 1.4.12 | `antigravity-client` | Real binary and model |
 | OpenClaw | 2026.10.4 | `openclaw-bundle-mcp`; `codex-mcp-client` when it runs turns in Codex | Real gateway in Docker, both runtimes |
@@ -127,12 +127,12 @@ The version each harness's wake path was verified on, against the real binary: i
 
 ### Wake times
 
-From the `emit` to the agent's first words in the woken conversation, on the bench, idle sessions with the install:
+From the `emit` to the agent's first words in the woken conversation, on a local server, idle sessions with the install (November 23, 2026):
 
-| Harness | p50 | p90 |
-| --- | --- | --- |
-| Claude Code | 5.4 s | 6.3 s |
-| Codex | 4.2 s | 6.1 s |
+| Harness | Median |
+| --- | --- |
+| Claude Code | 3.1 s |
+| Codex | 4.8 s |
 
 The server's own part is about 0.2 seconds; the rest is the harness starting its turn and the model replying. The other harnesses that wake while idle take seconds too; Muse took about 15.
 
@@ -152,7 +152,9 @@ Whether a conversation gets woken depends on the model agreeing to set it up. In
 
 ## Asks of harness vendors
 
-- **Cursor:** for `notify_on_output`, notify a match at once when nothing was notified in the last debounce window, or honor a `debounce_ms` below 5000: that window is about 5 seconds of every idle wake. For cloud agents, API keys scoped to one agent.
-- **Google (Antigravity):** give hooks a token that lets a hook wake its own conversation.
-- **Cursor and xAI (Grok Bot):** give the agent its routine's webhook URL and key when it creates one (today only the user sees them, so the setup needs a page), or a supported way to send a message into a Grok Bot conversation with a credential scoped to it.
-- **Every harness:** a client for MCP Events that delivers an event into the conversation that subscribed would make every bridge on this page unnecessary for it.
+These would make wakes faster or simpler. We'd be glad to help with any of them.
+
+- **Cursor:** `notify_on_output` waits out a debounce window of about 5 seconds before it notifies a match, which adds that much to every idle wake. Notifying a match at once when nothing was notified in the last window, or honoring a `debounce_ms` below 5000, would remove it. For cloud agents, API keys scoped to one agent would let a wake reach only that agent.
+- **Google (Antigravity):** a token for hooks that lets a hook wake its own conversation.
+- **Cursor and xAI (Grok Bot):** giving the agent its routine's webhook URL and key when it creates one (today only the user sees them, so the setup needs a page), or a supported way to send a message into a Grok Bot conversation with a credential scoped to it.
+- **Every harness:** a client for MCP Events that delivers an event into the conversation that subscribed would make the bridges on this page unnecessary for it.

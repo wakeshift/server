@@ -92,6 +92,11 @@ type Store struct {
 	// Allowed admits a new identity whatever the sign-up cap (existing
 	// users can always sign in). Nil admits nobody past the cap.
 	Allowed func(Identity) bool
+	// Closed closes sign-up to all but Allowed (a self-hosted server's
+	// default, config.Config.SignupsClosed): the cap, invite codes and
+	// organization invites admit nobody, and every other new identity
+	// waits on the waitlist, where the operator can invite it.
+	Closed bool
 	// InvitesPerUser is how many people each user can invite (default
 	// DefaultInvites).
 	InvitesPerUser int
@@ -133,11 +138,43 @@ func (s *Store) signIn(ctx context.Context, id Identity, email string) (User, er
 	var waitlisted *WaitlistedError
 	err := pgx.BeginFunc(ctx, s.Pool, func(tx pgx.Tx) error {
 		u, waitlisted = User{}, nil
-		// Known identity.
-		err := tx.QueryRow(ctx, `UPDATE users SET last_sign_in_at = now() FROM identities i
-			WHERE i.provider = $1 AND i.subject = $2 AND users.id = i.user_id
-			RETURNING users.id, users.email, users.name, users.session_epoch`, id.Provider, id.Subject).Scan(&u.ID, &u.Email, &u.Name, &u.SessionEpoch)
-		if err == nil || !errors.Is(err, pgx.ErrNoRows) {
+		// Known identity. Its email is the provider's current verified one,
+		// which may have changed since the last sign-in (a GitHub account's
+		// primary email, say): stored, so that what matches an email (an
+		// organization invite, orgs.Accept) matches the address the person
+		// holds now, never one they've given up. An address another user
+		// has is refused, as for a new identity (ErrAccountExists). Both
+		// rows change in this one transaction, users first: two sign-ins
+		// moving to one unused address at once both pass the check, and the
+		// loser's users update hits the unique email before its identity
+		// is touched; it's refused, and the transaction rolls back whole.
+		var known string
+		err := tx.QueryRow(ctx, `SELECT u.id, u.email FROM identities i JOIN users u ON u.id = i.user_id
+			WHERE i.provider = $1 AND i.subject = $2 FOR UPDATE OF u`, id.Provider, id.Subject).Scan(&known, &u.Email)
+		if err == nil {
+			changed := u.Email != email
+			if changed {
+				var taken bool
+				if err := tx.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM users WHERE email = $1 AND id <> $2)`, email, known).Scan(&taken); err != nil {
+					return err
+				}
+				if taken {
+					return ErrAccountExists
+				}
+			}
+			err := tx.QueryRow(ctx, `UPDATE users SET last_sign_in_at = now(), email = $2 WHERE id = $1
+				RETURNING id, email, name, session_epoch`, known, email).Scan(&u.ID, &u.Email, &u.Name, &u.SessionEpoch)
+			var pgErr *pgconn.PgError
+			if errors.As(err, &pgErr) && pgErr.Code == "23505" {
+				return ErrAccountExists
+			}
+			if err != nil {
+				return err
+			}
+			_, err = tx.Exec(ctx, `UPDATE identities SET email = $3 WHERE provider = $1 AND subject = $2 AND email <> $3`, id.Provider, id.Subject, email)
+			return err
+		}
+		if !errors.Is(err, pgx.ErrNoRows) {
 			return err
 		}
 		// A new identity: a new user, unless the email is taken. One query
@@ -162,7 +199,10 @@ func (s *Store) signIn(ctx context.Context, id Identity, email string) (User, er
 		// provider), locked until the sign-up commits.
 		var orgInvite *orgs.Pending
 		var orgInviteErr error
-		if id.OrgInvite != "" {
+		allowed := s.Allowed != nil && s.Allowed(Identity{Provider: id.Provider, Subject: id.Subject, Email: email, Name: id.Name, HostedDomain: id.HostedDomain})
+		// Closed: an invite code or an organization invite admits nobody
+		// the allow list doesn't (they wait on the waitlist instead).
+		if id.OrgInvite != "" && !(s.Closed && !allowed) {
 			p, err := orgs.PendingFor(ctx, tx, id.OrgInvite, email)
 			if err == nil {
 				orgInvite = &p
@@ -172,8 +212,7 @@ func (s *Store) signIn(ctx context.Context, id Identity, email string) (User, er
 			orgInviteErr = err
 		}
 		var invitedBy *string
-		allowed := s.Allowed != nil && s.Allowed(Identity{Provider: id.Provider, Subject: id.Subject, Email: email, Name: id.Name, HostedDomain: id.HostedDomain})
-		if !allowed && id.Invite != "" {
+		if !allowed && !s.Closed && id.Invite != "" {
 			// Spending a use, in the sign-up's transaction: a failed sign-up
 			// doesn't spend it, and two at once can't both take the last.
 			// An invite that's used up or unknown is no invite: the sign-up
@@ -205,7 +244,7 @@ func (s *Store) signIn(ctx context.Context, id Identity, email string) (User, er
 		default:
 			// Under the sign-up cap, or invited off the waitlist; else onto
 			// the waitlist, committed with no account.
-			via, entry, err := admit(ctx, tx, id, email)
+			via, entry, err := admit(ctx, tx, id, email, s.Closed)
 			if err != nil {
 				return err
 			}

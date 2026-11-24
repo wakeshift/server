@@ -65,6 +65,6 @@ func (h *Webhook) Data() []map[string]any {
 // this machine (a test's Webhook), until the test ends. It sets a package
 // variable, so a test that calls it mustn't run in parallel.
 func AllowLoopbackWebhooks(t *testing.T) {
-	mcpevents.AllowLoopback = true
-	t.Cleanup(func() { mcpevents.AllowLoopback = false })
+	mcpevents.SetAllowLoopback(true)
+	t.Cleanup(func() { mcpevents.SetAllowLoopback(false) })
 }

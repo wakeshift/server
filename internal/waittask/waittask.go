@@ -1,6 +1,5 @@
 // Package waittask makes and opens the IDs of MCP wait tasks: Claude
-// Code's no-install wake path (docs/harnesses.md, "Claude Code: MCP tasks
-// as a wake path"). An app's MCP server answers a call of Wakeshift's wait
+// Code's no-install wake path. An app's MCP server answers a call of Wakeshift's wait
 // tool with a task, and Claude Code polls tasks/get for it, through the
 // app's server, for as long as the conversation lives: across the app's
 // deploys, the core's, and the user closing and resuming Claude Code. So a

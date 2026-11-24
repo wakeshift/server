@@ -55,7 +55,7 @@ const (
 // LogEntry is one thing that happened to an app.
 type LogEntry struct {
 	AppID  string
-	Actor  string // user:<id>, app:<id> or hub
+	Actor  string // user:<id>, app:<id>, admin, or hub (Wakeshift itself)
 	Action string
 	KeyID  string // the key it's about (a KeyID, never the key)
 	Detail any    // marshaled to a JSON object; keep it small

@@ -527,16 +527,15 @@ func TestRenewalSavesWithoutATempLeft(t *testing.T) {
 	}
 }
 
-// Claude Code (2.1.319) refuses to run a command under a bash older than
-// 4, macOS's /bin/bash 3.2 among them, unless its own scanner reads the
-// command's quotes and substitutions as its parser does
+// Claude Code (2.1.319) was observed to refuse to run a command under a
+// bash older than 4, macOS's /bin/bash 3.2 among them, unless it can read
+// the command's quotes and substitutions unambiguously
 // (__CLAUDE_CODE_DID_NOT_RUN_BASH_TOO_OLD, exit 126: a Monitor that never
-// starts). The scanner gives up on a backtick, on ;&, on $$( and the like,
+// starts). The check gives up on a backtick, on ;&, on $$( and the like,
 // on a quote, backslash, $ that doesn't start a name, ( ) { or space
 // inside ${…}, and on a [ in a word that starts with a letter (as in
 // name[index]) unless it closes after letters, digits and -,.:^!. Every
-// command keeps clear of them (checked against 2.1.319's own scanner,
-// November 10, 2026, and in the bench on bash 3.2).
+// command keeps clear of them (as observed with 2.1.319, and on bash 3.2).
 func TestCommandsPassClaudeCodesShellCheck(t *testing.T) {
 	const url = "https://core.test/v1/stream/wait?link=wsl_abc"
 	for name, cmd := range map[string]string{"monitor": MonitorLoop(url), "cursor": CursorLoop(url, Claim{}), "until": UntilLoop(url, true),
@@ -554,7 +553,7 @@ func TestCommandsPassClaudeCodesShellCheck(t *testing.T) {
 
 // TestCommandsHaveNoRm: Codex refuses a command holding rm -f before it
 // runs ("rm -f style commands are not permitted. Use a safer approach",
-// ChatGPT's desktop app in Codex mode, November 11, 2026), and the agent
+// as observed in ChatGPT's desktop app in Codex mode), and the agent
 // then rewrites the command itself. No command or text Wakeshift serves
 // to an agent runs rm.
 func TestCommandsHaveNoRm(t *testing.T) {

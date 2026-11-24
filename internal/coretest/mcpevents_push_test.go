@@ -417,7 +417,14 @@ func TestPushMaxStreams(t *testing.T) {
 func TestPushVouchers(t *testing.T) {
 	c := coretest.Start(t)
 	app := voucherApp(t, c, "chat")
+	// None is handed out bound to neither now; one from before is refused.
+	if _, v := handOut(t, c, app, unboundCall(), "chat.message", eng, nil); v != "" {
+		t.Fatal("an unbound anonymous voucher was handed out")
+	}
 	_, unbound := handOut(t, c, app, anonCall(), "chat.message", eng, nil)
+	if _, err := c.DB.Pool.Exec(ctx, `UPDATE subscribe_vouchers SET transport_session = NULL WHERE token_hash = sha256(convert_to($1::text, 'UTF8'))`, unbound); err != nil {
+		t.Fatal(err)
+	}
 	voucherBody := func(call map[string]any, v string, cursor any) map[string]any {
 		return map[string]any{"call": call, "name": "chat.message", "arguments": eng, "cursor": cursor, "voucher": v}
 	}

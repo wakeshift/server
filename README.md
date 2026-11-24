@@ -12,7 +12,7 @@ Your code is the same for every agent. The SDKs attach to the MCP server you alr
 
 ## Run it
 
-You need Docker. In a clone of this repository:
+You need Docker. (Signing in to the console with `make run` also needs Go 1.27 and Node 22 or later.) In a clone of this repository:
 
 ```sh
 docker compose run --build --rm --no-deps --entrypoint /appkey server -app example
@@ -26,7 +26,9 @@ The first command makes your app's key and prints two lines:
 - `WAKESHIFT_KEY=wst_…`: your app's private key. Put it in your MCP server's environment, with `WAKESHIFT_CORE=http://localhost:8370`, and keep it out of version control.
 - `WAKESHIFT_APPS=[…]`: the app's public key, which registers it with the server.
 
-`docker compose up` then starts Postgres 17 and the server at `http://localhost:8370`, both on this machine's loopback only. The server migrates the database at startup, and MCP Events push is on. To sign in to the console on your own machine, use `make run` instead ([self-hosting](docs/self-hosting.md#signing-in-to-the-console)); to run the server anywhere else, see [docs/self-hosting.md](docs/self-hosting.md).
+`docker compose up` then starts Postgres 17 and the server at `http://localhost:8370`, both on this machine's loopback only. Postgres is published on `127.0.0.1:5439`; if that port is taken, `export WAKESHIFT_DB_PORT=5440` (or any free port) first. The server migrates the database at startup, and MCP Events push is on. To sign in to the console on your own machine, use `make run` instead ([self-hosting](docs/self-hosting.md#development-sign-in)); to run the server anywhere else, see [docs/self-hosting.md](docs/self-hosting.md).
+
+To stop, press Ctrl-C; `docker compose down -v` then removes the database. Apps registered through `WAKESHIFT_APPS` work with the SDKs but don't appear in the console's app list, which shows only the apps people create there.
 
 ### 1. Attach the SDK
 
@@ -37,9 +39,11 @@ npm install @wakeshift/sdk @modelcontextprotocol/server zod
 ```
 
 ```ts
+import { McpServer } from "@modelcontextprotocol/server"
 import { Wakeshift } from "@wakeshift/sdk"
 import { z } from "zod"
 
+const server = new McpServer({ name: "my-server", version: "1.0.0" }) // or your existing one
 const wake = new Wakeshift() // reads WAKESHIFT_KEY and WAKESHIFT_CORE from the environment
 
 export const buildFinished = wake.defineEvent("build.finished", {
@@ -49,7 +53,7 @@ export const buildFinished = wake.defineEvent("build.finished", {
   public: true, // open to subscribe_events and to MCP Events clients
 })
 
-const attached = wake.attach(server) // your McpServer
+const attached = wake.attach(server)
 ```
 
 `attach` answers `events/list`, `events/subscribe`, `events/poll` and `events/stream`, and adds a `subscribe_events` tool for agents whose clients don't speak MCP Events. Tools of your own can subscribe the conversation that called them too ([events](https://wakeshift.ai/docs/events)), and [who may subscribe](https://wakeshift.ai/docs/who-may-subscribe) covers `personal`, `authorize` and the default, where only your tools subscribe.

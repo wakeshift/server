@@ -21,7 +21,7 @@ import (
 // console as a developer would, writes the core's URL and the app's test key
 // to WAKESHIFT_SDK_HARNESS (a JSON file), and runs until that file is
 // removed (or 10 minutes pass: WAKESHIFT_SDK_HARNESS_MINUTES sets another
-// limit, for the MCP Events interop programs in bench/interop). Skipped
+// limit, for the MCP Events interop programs in bench/mcp-events). Skipped
 // without WAKESHIFT_SDK_HARNESS.
 //
 // The sign-up cap is then at its accounts, and waitlist_cookie is the

@@ -44,10 +44,9 @@ const KEY_READY = new RegExp(`wakebench: reading ${CURSOR_KEY_ENV} \\(42\\)`);
  * Where cursor-agent keeps the login it gets for an API key
  * (AGENT_CLI_CREDENTIAL_STORE: "memory", "file" or its default, the macOS
  * keychain). With the key, the bench has it keep that login in memory: the
- * temp HOME has no keychain it can write, and on a bench machine (2026.11.05 and
- * 2026.11.10) cursor-agent exited at start with "Error: Cursor couldn't save
- * your login to the macOS keychain. The keychain item is stuck." Each start
- * logs in with the key again, and nothing is written anywhere.
+ * temp HOME has no keychain it can write, and cursor-agent can exit at start
+ * when it can't save its login there. Each start logs in with the key again,
+ * and nothing is written anywhere.
  */
 export const CURSOR_STORE_ENV = "AGENT_CLI_CREDENTIAL_STORE";
 

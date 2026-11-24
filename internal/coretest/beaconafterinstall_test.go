@@ -14,8 +14,8 @@ import (
 // watch's beacon (in the result that says to install) goes unredeemed, and
 // the next tool's result, a moment later, is the first the plugin sees: it
 // must carry a beacon for that tool, which connects the conversation
-// (wakebench S12: join and post within a minute of watch got none, so
-// opencode missed every mention). Repeated calls to a tool without a
+// (in testing, without it, a join and a post within a minute of a watch
+// got none, so opencode missed every mention). Repeated calls to a tool without a
 // change still mint at most one ticket for it every few minutes. Both for
 // an app acting for its agents (Agent Chat) and for a user's conversation.
 func TestBeaconAfterInstall(t *testing.T) {

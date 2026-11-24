@@ -48,9 +48,8 @@ func TestPollRenewsPresenceInItsCheck(t *testing.T) {
 
 // An idle poll runs one transaction a tick (its check, which renews its
 // presence too), not a check and a renewal each in a transaction of its
-// own: with Poll and Renew both 30 s, as in production, that was two
-// transactions every 30 s per waiting conversation (the scalability
-// review's finding 5).
+// own: with Poll and Renew both 30 s, that was two transactions every
+// 30 s per waiting conversation.
 func TestIdlePollOneTransactionATick(t *testing.T) {
 	f := setup(t)
 	// The server's transactions, counted on a pool of its own.

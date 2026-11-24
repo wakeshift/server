@@ -8,6 +8,10 @@ package accounts
 // service) admits its next sign-in. Invite links, organization invites
 // and the allow list admit people whatever the cap; every account counts
 // towards it.
+//
+// Closed sign-up (Store.Closed, a self-hosted server's default) has no
+// cap: only the allow list and the operator's waitlist invites make
+// accounts, and invite links and organization invites admit nobody else.
 
 import (
 	"context"
@@ -51,9 +55,10 @@ type querier interface {
 
 // admit decides a new identity's sign-up, with no invite and not on the
 // allow list, in its transaction: "waitlist" if an entry for it was invited
-// (entry is its ID), "cap" if there are fewer accounts than the cap, or ""
-// with the identity put on the waitlist (entry is its entry, new or not).
-func admit(ctx context.Context, tx pgx.Tx, id Identity, email string) (via, entry string, err error) {
+// (entry is its ID), "cap" if there are fewer accounts than the cap (never
+// when sign-up is closed), or "" with the identity put on the waitlist
+// (entry is its entry, new or not).
+func admit(ctx context.Context, tx pgx.Tx, id Identity, email string, closed bool) (via, entry string, err error) {
 	var invited bool
 	err = tx.QueryRow(ctx, `SELECT id::text, invited_at IS NOT NULL FROM waitlist
 		WHERE (provider = $1 AND subject = $2) OR email = $3
@@ -67,16 +72,18 @@ func admit(ctx context.Context, tx pgx.Tx, id Identity, email string) (via, entr
 	// The cap's row is locked to the end of the sign-up, so two sign-ups
 	// at once can't both take the last place; the count is read after the
 	// lock, so it sees every account committed before.
-	var limit int
-	if err := tx.QueryRow(ctx, `SELECT cap FROM signup_cap FOR UPDATE`).Scan(&limit); err != nil && !errors.Is(err, pgx.ErrNoRows) {
-		return "", "", err
-	}
-	var used int
-	if err := tx.QueryRow(ctx, `SELECT count(*) FROM users`).Scan(&used); err != nil {
-		return "", "", err
-	}
-	if used < limit {
-		return "cap", entry, nil
+	if !closed {
+		var limit int
+		if err := tx.QueryRow(ctx, `SELECT cap FROM signup_cap FOR UPDATE`).Scan(&limit); err != nil && !errors.Is(err, pgx.ErrNoRows) {
+			return "", "", err
+		}
+		var used int
+		if err := tx.QueryRow(ctx, `SELECT count(*) FROM users`).Scan(&used); err != nil {
+			return "", "", err
+		}
+		if used < limit {
+			return "cap", entry, nil
+		}
 	}
 	ref := nullable(CleanRef(id.Ref))
 	if entry != "" {

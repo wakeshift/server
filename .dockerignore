@@ -1,7 +1,7 @@
 .git
 .github
 bin
-.env
-.env.*
+**/.env
+**/.env.*
 **/node_modules
 web/dist

@@ -43,7 +43,8 @@ function Body({ app }: { app: OwnedApp }) {
         {list.isPending && <Loading />}
         {list.isSuccess && rows.length === 0 && (
           <Empty title="No subscriptions">
-            Wrap one of your MCP tools with <code>attached.events</code> and call <code>call.subscribe(event, args)</code> in it, or let agents use{' '}
+            Register one of your MCP tools with <code>attached.registerTool</code>, with the event in its <code>subscribes</code>, and
+            call <code>call.subscribe(event, args)</code> in it, or let agents use{' '}
             <code>subscribe_events</code>. A subscription shows up here until it
             ends: unsubscribed, ended by you, or expired after its time without a wake-up (30 days unless you set a ttl).
           </Empty>

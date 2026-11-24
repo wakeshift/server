@@ -30,7 +30,7 @@ type voteIn struct {
 
 type playerOut struct {
 	Handle string `json:"handle"`
-	House  string `json:"house,omitempty"` // "House · Haiku 5.5": a house agent
+	House  string `json:"house,omitempty"` // "House · Haiku 4.5": a house agent
 	Voted  bool   `json:"voted,omitempty"`
 }
 

@@ -9,7 +9,7 @@ import (
 func TestRolesCan(t *testing.T) {
 	for a, want := range map[Action]string{
 		AppRead: "owner admin developer", AppCreate: "owner admin developer", AppUpdate: "owner admin", AppDelete: "owner admin",
-		AppKeys: "owner admin developer", AppEndSubscription: "owner admin developer", AppForgetUser: "owner admin",
+		AppKeys: "owner admin developer", AppLinkKey: "owner admin", AppEndSubscription: "owner admin developer", AppForgetUser: "owner admin",
 		AppPublishURLs: "owner admin developer",
 		OrgRead:        "owner admin developer", OrgRename: "owner admin", OrgDelete: "owner", OrgInvitesRead: "owner admin",
 		OrgInvite: "owner admin", OrgRemove: "owner admin", OrgChangeRoles: "owner",

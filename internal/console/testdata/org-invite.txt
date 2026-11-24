@@ -2,7 +2,7 @@ INVITATION
 Join Acme Robotics on Wakeshift
 ===============================
 
-Ada Lovelace invited you to join Acme Robotics on Wakeshift as a developer. As a developer, you can create apps in Acme Robotics and manage their keys.
+ada@example.com invited you to join Acme Robotics on Wakeshift as a developer. As a developer, you can create apps in Acme Robotics and manage their keys.
 
 Join Acme Robotics:
 https://app.wakeshift.ai/join#token
@@ -12,6 +12,6 @@ The link works once, only for cy@example.com, until 4 November 2026. You accept 
 If you weren't expecting this invite, ignore this email. Nothing changes unless you accept.
 
 -- 
-Ada Lovelace sent this invite from the Wakeshift console.
+ada@example.com sent this invite from the Wakeshift console.
 Sent by Wakeshift (Clawvisor Inc.)
 Questions? Write to support@wakeshift.ai.

@@ -35,8 +35,7 @@ type Subscription struct {
 
 // Statuses. Canceled was stored and reported as "cancelled" before
 // migration 116; rows the previous release wrote while it rolled out
-// still say so, and scan reports them as Canceled (AGENTS.md, Pending
-// removals).
+// still say so, and scan reports them as Canceled.
 const (
 	Active   = "active"
 	Canceled = "canceled"

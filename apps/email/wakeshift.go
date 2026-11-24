@@ -1,7 +1,7 @@
 package email
 
 // LogoURL and DarkLogoURL are Wakeshift's logo for email, served by the
-// site (site/static/email): an image on wakeshift.ai, never an attachment.
+// site: an image on wakeshift.ai, never an attachment.
 const (
 	LogoURL     = "https://wakeshift.ai/static/email/wakeshift.png"
 	DarkLogoURL = "https://wakeshift.ai/static/email/wakeshift-dark.png"

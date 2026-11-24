@@ -300,10 +300,9 @@ func publish(t *testing.T, c *coretest.Core, app *wakeshift.Client, tokens ...st
 }
 
 func eventsTestSetup(t *testing.T) {
-	mcpevents.AllowLoopback = true
-	base := mcpevents.BackoffBase
-	mcpevents.BackoffBase = 20 * time.Millisecond
-	t.Cleanup(func() { mcpevents.AllowLoopback = false; mcpevents.BackoffBase = base })
+	mcpevents.SetAllowLoopback(true)
+	restore := mcpevents.SetBackoffBase(20 * time.Millisecond)
+	t.Cleanup(func() { mcpevents.SetAllowLoopback(false); restore() })
 }
 
 func deliveryStates(t *testing.T, c *coretest.Core, app, user string) map[string]int {

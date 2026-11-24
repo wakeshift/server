@@ -214,8 +214,8 @@ func TestClaudeCodeMovesFromMonitorToHooks(t *testing.T) {
 	}
 }
 
-// blackHole is a proxy that, like Google's front end in front of staging,
-// never tells the server its client went away: it keeps taking what the
+// blackHole is a proxy that, like some load balancers' front ends, never
+// tells the server its client went away: it keeps taking what the
 // server writes.
 func blackHole(t *testing.T, upstream string) string {
 	t.Helper()
@@ -254,8 +254,8 @@ func blackHole(t *testing.T, upstream string) string {
 	return ln.Addr().String()
 }
 
-// A Monitor that died behind a front end that never tells the server (the
-// staging run: its curl killed, the front end still taking writes): its
+// A Monitor that died behind a front end that never tells the server (its
+// curl killed, the front end still taking writes): its
 // wait ends at its timeout, and the session stops counting as connected
 // soon after. A post in between goes into the dead wait, but it was never
 // confirmed (no next round asked for it), so the next Monitor gets it

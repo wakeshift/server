@@ -101,6 +101,9 @@ func (a *API) respondEvents(w http.ResponseWriter, v any, err error) {
 	}
 }
 
+// eventsClient is the client a verification is sent with: by default a new
+// one each time, so it holds no connection from before and goes only to
+// the addresses verifyCallback counted (mcpevents.Pinned).
 func (a *API) eventsClient() *http.Client {
 	if a.EventsClient != nil {
 		return a.EventsClient

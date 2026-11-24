@@ -203,7 +203,7 @@ func (c *Console) joinSignIn(w http.ResponseWriter, r *http.Request) {
 // joinToken is the invite token the join page kept for this sign-in, if
 // any.
 func (c *Console) joinToken(r *http.Request) string {
-	ck, err := r.Cookie(joinCookie)
+	ck, err := r.Cookie(c.cookieName(joinCookie))
 	var j joinClaims
 	if err != nil || !c.verify("join", ck.Value, &j) || c.now().Unix() > j.Exp {
 		return ""
@@ -307,7 +307,7 @@ func (c *Console) finishGoogle(r *http.Request) (accounts.User, flow, error) {
 // callback's.
 func (c *Console) readFlow(r *http.Request, cookie, purpose string) (flow, error) {
 	var f flow
-	ck, err := r.Cookie(cookie)
+	ck, err := r.Cookie(c.cookieName(cookie))
 	if err != nil || !c.verify(purpose, ck.Value, &f) || c.now().Unix() > f.Exp {
 		return flow{}, errors.New("no sign-in in progress (or it expired)")
 	}

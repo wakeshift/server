@@ -129,7 +129,7 @@ class Toy:
                 return ev["textTagged"].replace("{code}", p.code).replace("{tag}", p.tag)
             return ev["text"].replace("{code}", p.code)
 
-        # public: the bench's lanes subscribe through every path (design §3).
+        # public: the bench's lanes subscribe through every path.
         self.event = self.wake.define_event(
             ev["name"], description=ev["description"], args=Args, payload=Payload, text=text, topic=ev["topic"], public=True
         )

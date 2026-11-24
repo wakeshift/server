@@ -30,6 +30,20 @@ func TestConnectorSignsWhatTheCoreVerifies(t *testing.T) {
 	if !botkeys.Verify(pub, bot, ch, ed25519.Sign(priv, connector.GrokMessage(bot, ch))) {
 		t.Fatal("a signature by the connector doesn't verify")
 	}
+	// The v2 register proof and the fetch: one fixed vector, the same on
+	// both sides.
+	const ws, app = "0b8f3c1e-2d4a-4b6c-8e0f-1a2b3c4d5e6f", "ci"
+	want := "wakeshift-proof-v2\n" + bot + "\n" + ch + "\n" + ws + "\n" + app
+	if string(botkeys.RegisterMessage(bot, ch, ws, app)) != want || string(connector.GrokRegisterMessage(bot, ch, ws, app)) != want {
+		t.Fatal("the v2 register proof's signed text differs between the core and the connector")
+	}
+	if !botkeys.VerifyRegister(pub, bot, ch, ws, app, ed25519.Sign(priv, connector.GrokRegisterMessage(bot, ch, ws, app))) {
+		t.Fatal("a v2 signature by the connector doesn't verify")
+	}
+	if string(botkeys.FetchMessage(bot, "1700000000")) != "wakeshift-fetch\n"+bot+"\n1700000000" ||
+		string(connector.GrokFetchMessage(bot, "1700000000")) != string(botkeys.FetchMessage(bot, "1700000000")) {
+		t.Fatal("the fetch's signed text differs between the core and the connector")
+	}
 	for _, id := range []string{bot, "bc-123", "a.b_c:d-e"} {
 		if botkeys.BotIDOK(id) != connector.GrokBotOK(id) {
 			t.Errorf("%q: the core and the connector disagree on the bot ID", id)

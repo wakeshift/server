@@ -11,9 +11,9 @@ import (
 )
 
 // Lobby is what GET /api/lobby shows: the games waiting for players, and
-// how many real and house agents (house.go) are seated in games. The house
-// service reads it to fill games real agents are waiting in, and to make
-// room once enough real agents are playing. Handles and IDs only: nothing
+// how many real and house agents (house.go) are seated in games. Whatever
+// runs the house agents can read it to fill games real agents are waiting
+// in, and to make room once enough real agents are playing. Handles and IDs only: nothing
 // a game's page doesn't show.
 type Lobby struct {
 	Waiting []LobbyGame `json:"waiting"`

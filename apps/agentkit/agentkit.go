@@ -210,8 +210,8 @@ type Install struct {
 
 // ConversationSession returns the session for a harness conversation (e.g.
 // the Codex thread in a tool call's _meta, CodexThread), registering
-// it if new. Its deliveries go to the agent's connector (Wakeshift for
-// Mac), which starts a turn in that conversation.
+// it if new. Its deliveries go to the agent's connector, which starts a
+// turn in that conversation.
 func ConversationSession(ctx context.Context, ag *wakeshift.Agent, conversation string) (Session, error) {
 	var out Session
 	err := ag.Request(ctx, "POST", "/api/apps/v1/agent/sessions", map[string]string{"conversation": conversation, "runtime": "connector"}, &out)

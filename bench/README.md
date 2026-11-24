@@ -121,7 +121,7 @@ After each scenario the bench also counts how often each code reached the model,
 
 `bench/run` prints a text grid and the paths of `report.html` and `results.json`. `report.html` is one static file that fetches nothing.
 
-- **Rows are harnesses, grouped by tier; columns are scenarios.** Tiers and their bars live in `tiers.yaml`, the one place thresholds are set. Tier 1 (Claude Code, Codex) has the strictest bars; tier 2 (supported) and tier 3 (best effort) have their own.
+- **Rows are harnesses, grouped by tier; columns are scenarios.** Tiers and their bars live in `tiers.yaml`, the one place thresholds are set. Tier 1 (Claude Code, Codex) has the strictest bars; tier 2 has looser times, and tier 3 is graded on whether it works, plus a few bars for particular harnesses.
 - **Each cell is a grade with its key number.**
   - **pass**: it worked and every bar was met.
   - **below bar**: it worked, but a bar was missed. Hover over the cell for which one.

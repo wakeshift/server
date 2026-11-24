@@ -1,264 +1,257 @@
 # gitleaks' configuration (CI: .github/workflows/ci.yml): its default rules,
-# and every known false positive in this repository, one file at a time,
-# with why it's harmless. Each entry names only the rules that matched it,
-# so a different kind of secret in the same file is still reported. A new
-# hit is a real finding until someone reads it and adds it here with a
-# reason; never allowlist a directory.
+# rules for Wakeshift's own credentials, and every known false positive in
+# this repository, with why it's harmless. Each allowlist is pinned to the
+# exact fixture values (regexes, anchored) AND the files that hold them
+# (condition = "AND"), and names only the rules that matched them: a
+# different value in the same file, or the same value in another file, is
+# still reported. A new hit is a real finding until someone reads it and
+# adds its value here with a reason; never allowlist a whole file or a
+# directory.
 
 [extend]
 useDefault = true
 
-# The SDKs' shared fixtures (the golden files every SDK's tests read).
+# ── Wakeshift's own credentials ──────────────────────────────────────────
+#
+# Each rule matches only the exact shape the code mints (prefix, alphabet,
+# length), so prose that names a prefix ("a wsv_ token") isn't a finding,
+# and the boundaries keep a longer string from matching as a shorter
+# token.
 
+[[rules]]
+id = "wakeshift-app-key"
+description = "A Wakeshift app key: wst_ and 50 base58 characters (internal/appkey: Format)"
+regex = '''(?:^|[^0-9A-Za-z_-])(wst_[1-9A-HJ-NP-Za-km-z]{50})(?:[^0-9A-Za-z_-]|$)'''
+secretGroup = 1
+keywords = ["wst_"]
+
+[[rules]]
+id = "wakeshift-app-key-legacy"
+description = "An older Wakeshift app key: wst_test_ or wst_live_, an app ID and a base64url Ed25519 seed (internal/appkey: Parse)"
+regex = '''(?:^|[^0-9A-Za-z_-])(wst_(?:test|live)_[a-z][a-z0-9-]{1,39}_[A-Za-z0-9_-]{43})(?:[^0-9A-Za-z_-]|$)'''
+secretGroup = 1
+keywords = ["wst_test_", "wst_live_"]
+
+[[rules]]
+id = "wakeshift-workspace-token"
+description = "A Wakeshift one-time token bound to a workspace: wst_ (a connector ticket), wse_ (an elicitation), wso_ (a link claim) or wsu_ (a session setup), the workspace's UUID and 32 random bytes in base64url (internal/appapi)"
+regex = '''(?:^|[^0-9A-Za-z_-])(ws[teou]_[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}_[A-Za-z0-9_-]{43})(?:[^0-9A-Za-z_-]|$)'''
+secretGroup = 1
+keywords = ["wst_", "wse_", "wso_", "wsu_"]
+
+[[rules]]
+id = "wakeshift-publish-url"
+description = "A Wakeshift publish URL's token: wsp_ and 32 random bytes in base64url (internal/appapi: newPublishURL)"
+regex = '''(?:^|[^0-9A-Za-z_-])(wsp_[A-Za-z0-9_-]{43})(?:[^0-9A-Za-z_-]|$)'''
+secretGroup = 1
+keywords = ["wsp_"]
+
+[[rules]]
+id = "wakeshift-subscribe-voucher"
+description = "A Wakeshift subscribe voucher: wsv_ and 32 lowercase base32 characters (internal/appapi: newVoucher)"
+regex = '''(?:^|[^0-9A-Za-z_-])(wsv_[a-z2-7]{32})(?:[^0-9A-Za-z_-]|$)'''
+secretGroup = 1
+keywords = ["wsv_"]
+
+[[rules]]
+id = "wakeshift-session-handle"
+description = "A Wakeshift session handle: wsc_ and 128 random bits, as 26 lowercase base32 or 22 base64url characters (internal/appapi: newSessionToken, newConversation)"
+regex = '''(?:^|[^0-9A-Za-z_-])(wsc_(?:[a-z2-7]{26}|[A-Za-z0-9_-]{22}))(?:[^0-9A-Za-z_-]|$)'''
+secretGroup = 1
+keywords = ["wsc_"]
+
+[[rules]]
+id = "wakeshift-wait-task"
+description = "A Wakeshift wait task ID: wkt1_ and 68 sealed bytes in base64url (internal/waittask: Mint)"
+regex = '''(?:^|[^0-9A-Za-z_-])(wkt1_[A-Za-z0-9_-]{91})(?:[^0-9A-Za-z_-]|$)'''
+secretGroup = 1
+keywords = ["wkt1_"]
+
+[[rules]]
+id = "wakeshift-stream-link"
+description = "A Wakeshift stream link's token: base64url JSON naming the workspace ({\"t\":…), a dot and its HMAC-SHA256 (internal/streams: urlOf)"
+regex = '''(?:^|[^0-9A-Za-z_-])(eyJ0Ijoi[A-Za-z0-9_-]{40,}\.[A-Za-z0-9_-]{43})(?:[^0-9A-Za-z_.-]|$)'''
+secretGroup = 1
+keywords = ["eyj0ijoi"]
+
+[[rules]]
+id = "wakeshift-reserved-prefix"
+description = "A token under one of Wakeshift's reserved prefixes, not minted today: wsk_ (an older key prefix), wsl_ (stream links) and wsa_ (agent tokens), with a random-looking body"
+regex = '''(?:^|[^0-9A-Za-z_-])(ws[kla]_[A-Za-z0-9_-]{24,})(?:[^0-9A-Za-z_-]|$)'''
+secretGroup = 1
+entropy = 3.0
+keywords = ["wsk_", "wsl_", "wsa_"]
+
+[[rules]]
+id = "webhook-signing-secret"
+description = "A Standard Webhooks signing secret, as MCP Events webhooks use: whsec_ and base64 of 24 to 64 bytes (internal/mcpevents: ParseSecret); the generic rule misses those with + or /"
+regex = '''(?:^|[^0-9A-Za-z_])(whsec_[A-Za-z0-9+/]{32,}={0,2})(?:[^0-9A-Za-z+/=]|$)'''
+secretGroup = 1
+keywords = ["whsec_"]
+
+# ── Known false positives, by fixture value ──────────────────────────────
+
+# The SDKs' shared app-key fixtures (sdk/typescript/test/app-keys.json):
+# keys made from the patterned seeds in that file (all zeros, 0x00..0x1f,
+# a 0xdeadbeef pattern, all 0xff), the malformed keys the parsers must
+# refuse (a character outside base58, one short, one long, a bad
+# checksum, the bare body, another prefix), and the two older-format keys
+# with an all-zero or patterned seed. The SDKs' tests, test helpers
+# (sdk/typescript/src/testing.ts) and pack checks, the bench's tests and
+# internal/appkey's test use them as test keys, against fake cores.
 [[allowlists]]
-description = "App keys made from the fixture seeds in the same file (all zeros, 0x00..0x1f, a 0xdeadbeef pattern, all 0xff), and malformed keys the parser must refuse"
-targetRules = ["generic-api-key"]
-paths = ['''(^|/)sdk/typescript/test/app-keys\.json$''']
+description = "app-keys.json's fixture app keys (patterned seeds) and its malformed keys"
+targetRules = ["generic-api-key", "wakeshift-app-key", "wakeshift-app-key-legacy"]
+condition = "AND"
+regexes = [
+  '''^(?:wst_|sk_)?1116qJFWMMHFy3xDdLmvUeyc2S6FrWRhJP51HsvDYdz9fWXzS[VW]?1?$''',
+  '''^wst_1116qJFWMM[0IOl]Fy3xDdLmvUeyc2S6FrWRhJP51HsvDYdz9fWXzSV$''',
+  '''^wst_111111111111111111111111111111111111111111111e8AP6$''',
+  '''^wst_2h52eWJ6Nz65aiGDNwcugUMid1EBPpxtzZszqoePwD2ybDJTaf$''',
+  '''^wst_2wkBET2rRgE8pahuaczxKbmv7ciehqsne57F9gtzf1PVd47xta$''',
+  '''^wst_z{50}$''',
+  '''^wst_live_my-app_3q2-7__7A{35}$''',
+  '''^wst_test_ci-bot_A{43}$''',
+]
+paths = [
+  '''(^|/)sdk/typescript/test/[^/]+\.(json|ts)$''',
+  '''(^|/)sdk/typescript/src/testing\.ts$''',
+  '''(^|/)sdk/typescript/scripts/(pack|bundle)-check/[^/]+\.(ts|mjs)$''',
+  '''(^|/)sdk/python/tests/test_(client|keys)\.py$''',
+  '''(^|/)bench/test/(elicit|unit)\.test\.ts$''',
+  '''(^|/)internal/appkey/appkey_test\.go$''',
+]
 
+# MCP Events webhook signing secrets in the shared wire fixture
+# (sdk/typescript/test/mcp-events-wire.json): whsec_ and base64 of
+# "test-secret-test-secret-test" (with https://agent.example), or of
+# "test"; and the Standard Webhooks specification's published example
+# secret, the test vector internal/mcpevents checks signatures against.
 [[allowlists]]
-description = "WAKESHIFT_KEY values in the disabled-client fixture: three of app-keys.json's fixture keys"
-targetRules = ["generic-api-key"]
-paths = ['''(^|/)sdk/typescript/test/disabled-client\.json$''']
+description = "Fixture webhook secrets (base64 of test words) and the Standard Webhooks test vector"
+targetRules = ["generic-api-key", "webhook-signing-secret"]
+condition = "AND"
+regexes = [
+  '''^whsec_dGVzdC1zZWNyZXQtdGVzdC1zZWNyZXQtdGVzdA==$''',
+  '''^whsec_dGVzdA==$''',
+  '''^whsec_MfKQ9r8GKYqrTwjUPD8ILPZIo2LaLaSw$''',
+]
+paths = [
+  '''(^|/)sdk/typescript/test/(mcp-events-wire|secret-pattern)\.json$''',
+  '''(^|/)sdk/typescript/test/(context|interop|testing|vouchers)\.test\.ts$''',
+  '''(^|/)sdk/typescript/src/testing\.ts$''',
+  '''(^|/)sdk/python/tests/test_(identity|interop|vouchers)\.py$''',
+  '''(^|/)internal/mcpevents/(mcpevents|verify)_test\.go$''',
+]
 
+# Placeholder tokens in Wakeshift's shapes: one repeated character, a
+# repeated word (fake, canary, CODEcode, OTHERother), a nil UUID, or base64
+# of a phrase ("from-the-redeem"). The SDKs' and connector's tests pass
+# them to fake cores, and the redaction tests check they never reach a log.
 [[allowlists]]
-description = "One fixture webhook signing secret (whsec_), used throughout the MCP Events wire fixture with https://agent.example"
-targetRules = ["generic-api-key"]
-paths = ['''(^|/)sdk/typescript/test/mcp-events-wire\.json$''']
+description = "Made-up session handles, vouchers, stream links and one-time tokens with patterned bodies"
+targetRules = ["generic-api-key", "wakeshift-session-handle", "wakeshift-subscribe-voucher", "wakeshift-workspace-token", "wakeshift-reserved-prefix"]
+condition = "AND"
+regexes = [
+  '''^wsc_(?:A{22}|B{22}|a{26}|(?:fake){6}fa|canarysessionkey(?:123456|7f3a9c)|canary_secret_0123456789|forged_0123456789)$''',
+  '''^wsc_(?:ZnJvbS10aGUtcmVkZWVt|YWdhaW4tZnJvbS1yZWRlZW0)$''',
+  '''^wsv_(?:a{32}|b{32}|c{32}|(?:fake){8}|(?:canary){5}ca)$''',
+  '''^wse_00000000-0000-4000-8000-000000000000_A{43}$''',
+  '''^wso_00000000-0000-0000-0000-000000000000_(?:(?:CODEcode){5}COD|(?:OTHERother){4}OTH)$''',
+  '''^wsl_9f8e7d6c5b4a39281706f5e4d3c2b1a0$''',
+]
+paths = [
+  '''(^|/)sdk/typescript/test/(disabled-client|secret-pattern|mcp-events-wire|client-requests)\.json$''',
+  '''(^|/)sdk/typescript/test/(clientrequests|context|e2e|push|secrets)\.test\.ts$''',
+  '''(^|/)sdk/typescript/scripts/pack-check/cjs\.ts$''',
+  '''(^|/)sdk/python/tests/test_(fastmcp23|secrets|toolcall)\.py$''',
+  '''(^|/)plugins/hermes/tests/test_plugin\.py$''',
+  '''(^|/)internal/connector/sessionkey_test\.go$''',
+  '''(^|/)internal/coretest/(topics|keyless_unsubscribe)_test\.go$''',
+  '''(^|/)internal/harnesses/linkclaim_test\.go$''',
+  '''(^|/)internal/telemetry/(logscrub|scrub)_test\.go$''',
+]
 
+# JWTs signed by no real issuer: "alg":"none", or a signature that is
+# base64 of "fake-signature-not-real" or "signature-bytes". The secret
+# scrubber's fixture and the bench's report must redact them.
 [[allowlists]]
-description = "Inputs the secret scrubber must redact: a made-up signing secret and JWTs signed by no real issuer"
-targetRules = ["generic-api-key", "jwt"]
-paths = ['''(^|/)sdk/typescript/test/secret-pattern\.json$''']
+description = "Made-up JWTs the secret scrubber and the bench's report must redact"
+targetRules = ["jwt"]
+condition = "AND"
+regexes = [
+  '''^eyJhbGciOiJFZERTQSIsInR5cCI6IkpXVCJ9\.eyJzdWIiOiJmYWtlIiwiaXNzIjoidGVzdCJ9\.ZmFrZS1zaWduYXR1cmUtbm90LXJlYWw\\?$''',
+  '''^eyJhbGciOiJub25lIn0\.eyJzdWIiOiJmYWtlIn0\.$''',
+  '''^eyJhbGciOiJFZERTQSJ9\.eyJ0aWNrZXQiOiJhYmMifQ\.c2lnbmF0dXJlLWJ5dGVz$''',
+]
+paths = [
+  '''(^|/)sdk/typescript/test/secret-pattern\.json$''',
+  '''(^|/)bench/test/unit\.test\.ts$''',
+]
 
-# Go tests: canaries a test checks never reach a log, and test vectors.
-
+# Go and bench tests' canaries (values a test checks never reach a log or
+# telemetry) and made-up credentials, each in the one file that uses it.
 [[allowlists]]
 description = "A made-up webhook secret the test signs with"
 targetRules = ["generic-api-key"]
+condition = "AND"
+regexes = ['''^aB3dE5fG7hJ9kL1mN3pQ5r$''']
 paths = ['''(^|/)internal/agenthooks/agenthooks_test\.go$''']
 
 [[allowlists]]
-description = "A made-up bot ID and setup code for the bot-key format's test"
+description = "A made-up bot ID (a UUID) for the bot-key format's test"
 targetRules = ["generic-api-key"]
+condition = "AND"
+regexes = ['''^0b8f3c1e-2d4a-4b6c-8e0f-1a2b3c4d5e6f$''']
 paths = ['''(^|/)internal/botkeys/commands_test\.go$''']
 
 [[allowlists]]
 description = "Canary watch-URL secrets the test checks never reach a log"
 targetRules = ["generic-api-key"]
+condition = "AND"
+regexes = ['''^capyCanary(?:4k8ZxCvBnMaSd3|7x2QwErTyUiOp9)$''']
 paths = ['''(^|/)internal/coretest/capy_webhook_test\.go$''']
 
 [[allowlists]]
 description = "A canary the test checks telemetry never exports"
 targetRules = ["generic-api-key"]
+condition = "AND"
+regexes = ['''^capyWtch5Lq8Rt2V$''']
 paths = ['''(^|/)internal/coretest/telemetry_capy_test\.go$''']
-
-[[allowlists]]
-description = "A Standard Webhooks test vector: a published example secret and the signature it gives"
-targetRules = ["generic-api-key"]
-paths = ['''(^|/)internal/mcpevents/verify_test\.go$''']
 
 [[allowlists]]
 description = "An Ed25519 public key (no private half), for the OAuth tests"
 targetRules = ["generic-api-key"]
+condition = "AND"
+regexes = ['''^11qYAYKxCrfVS/7TyWQHOg7hcvPapiMlrwIaaPcHURo=$''']
 paths = ['''(^|/)internal/oauth/oauth_test\.go$''']
 
 [[allowlists]]
-description = "Canary tokens the log scrubber must redact"
+description = "A made-up wrong development sign-in token the test checks is refused"
 targetRules = ["generic-api-key"]
-paths = ['''(^|/)internal/telemetry/(logscrub|scrub)_test\.go$''']
-
-# The Hermes plugin's tests (Python).
+condition = "AND"
+regexes = ['''^0123456789abcdef-wrong-tok$''']
+paths = ['''(^|/)internal/auth/dev_test\.go$''']
 
 [[allowlists]]
-description = "Made-up session keys a fake core hands the plugin in its tests"
+description = "A canary bearer token the Python SDK's secret-handling tests check is never printed"
 targetRules = ["generic-api-key"]
-paths = ['''(^|/)plugins/hermes/tests/test_plugin\.py$''']
-
-# The bench subset (the harness runner) and the SDKs it builds
-# (sdk/typescript, sdk/python, pkg/wakeshift, whose own repositories
-# publish them too): fixtures and canaries.
-
-[[allowlists]]
-description = "One of app-keys.json's fixture app keys (made from patterned seeds), used as a test key"
-targetRules = ["generic-api-key"]
-paths = ['''(^|/)bench/test/elicit\.test\.ts$''']
-
-[[allowlists]]
-description = "The redaction tests' made-up token, an app-keys.json fixture key, and a beacon signed by a test key: what the bench's report must redact"
-targetRules = ["generic-api-key", "jwt"]
-paths = ['''(^|/)bench/test/unit\.test\.ts$''']
-
-[[allowlists]]
-description = "A made-up token in Wakeshift's shapes (the file says none is a real credential)"
-targetRules = ["generic-api-key"]
-paths = ['''(^|/)bench/test/visible\.test\.ts$''']
-
-[[allowlists]]
-description = "One of app-keys.json's fixture app keys (made from patterned seeds), used as a test key"
-targetRules = ["generic-api-key"]
-paths = ['''(^|/)pkg/wakeshift/helpers_test\.go$''']
-
-[[allowlists]]
-description = "One of app-keys.json's fixture app keys (made from patterned seeds), used as a test key"
-targetRules = ["generic-api-key"]
-paths = ['''(^|/)pkg/wakeshift/helpers_internal_test\.go$''']
-
-[[allowlists]]
-description = "One of app-keys.json's fixture app keys (made from patterned seeds), used as a test key"
-targetRules = ["generic-api-key"]
-paths = ['''(^|/)pkg/wakeshift/mcpgo/mcpgo_test\.go$''']
-
-[[allowlists]]
-description = "One of app-keys.json's fixture app keys (made from patterned seeds), used as a test key, as the canary a logger mustn't print"
-targetRules = ["generic-api-key"]
-paths = ['''(^|/)pkg/wakeshift/testdata/zapleak/leak_test\.go$''']
-
-[[allowlists]]
-description = "mcp-events-wire.json's fixture webhook secret (whsec_), with an example.com or agent.example URL"
-targetRules = ["generic-api-key"]
-paths = ['''(^|/)pkg/wakeshift/interop_golden_internal_test\.go$''']
-
-[[allowlists]]
-description = "mcp-events-wire.json's fixture webhook secret (whsec_), with an example.com or agent.example URL"
-targetRules = ["generic-api-key"]
-paths = ['''(^|/)pkg/wakeshift/vouchers_internal_test\.go$''']
-
-[[allowlists]]
-description = "Not a secret: a dataclass field declaration (private_key: … = field(repr=False))"
-targetRules = ["generic-api-key"]
-paths = ['''(^|/)sdk/python/src/wakeshift/_key\.py$''']
-
-[[allowlists]]
-description = "A fixture webhook secret: whsec_ and base64 of the word test"
-targetRules = ["generic-api-key"]
-paths = ['''(^|/)sdk/python/tests/test_identity\.py$''']
-
-[[allowlists]]
-description = "mcp-events-wire.json's fixture webhook secret (whsec_), with an example.com or agent.example URL"
-targetRules = ["generic-api-key"]
-paths = ['''(^|/)sdk/python/tests/test_interop\.py$''']
-
-[[allowlists]]
-description = "mcp-events-wire.json's fixture webhook secret (whsec_), with an example.com or agent.example URL"
-targetRules = ["generic-api-key"]
-paths = ['''(^|/)sdk/python/tests/test_vouchers\.py$''']
-
-[[allowlists]]
-description = "A made-up session key the test passes as a tool argument"
-targetRules = ["generic-api-key"]
-paths = ['''(^|/)sdk/python/tests/test_fastmcp23\.py$''']
-
-[[allowlists]]
-description = "A canary the secret-handling tests check is never printed"
-targetRules = ["generic-api-key"]
+condition = "AND"
+regexes = ['''^canary-bearer-7f3a9c1e5b$''']
 paths = ['''(^|/)sdk/python/tests/test_secrets\.py$''']
 
 [[allowlists]]
-description = "A made-up session key passed as a tool argument"
+description = "The bench's made-up tokens in Wakeshift's shapes (its files say none is a real credential), which its report must redact"
 targetRules = ["generic-api-key"]
-paths = ['''(^|/)sdk/python/tests/test_toolcall\.py$''']
+condition = "AND"
+regexes = ['''^(?:Xk3vQ9mZ2pLr7sT4wY8bN1cD5fG6hJ0aE|Zk3mQ9rT2vXw8yB1nC4dE6fG7hJ0kL5pS)$''']
+paths = ['''(^|/)bench/test/(unit|visible)\.test\.ts$''']
 
+# Not a secret: a dataclass field's type (private_key: Ed25519PrivateKey =
+# field(repr=False)).
 [[allowlists]]
-description = "One of app-keys.json's fixture app keys (made from patterned seeds), used as a test key, against a fake core (https://core.test)"
+description = "A type name, not a key"
 targetRules = ["generic-api-key"]
-paths = ['''(^|/)sdk/typescript/scripts/pack\-check/cjs\.ts$''']
-
-[[allowlists]]
-description = "One of app-keys.json's fixture app keys (made from patterned seeds), used as a test key"
-targetRules = ["generic-api-key"]
-paths = ['''(^|/)sdk/typescript/scripts/pack\-check/server\.ts$''']
-
-[[allowlists]]
-description = "One of app-keys.json's fixture app keys (made from patterned seeds), used as a test key"
-targetRules = ["generic-api-key"]
-paths = ['''(^|/)sdk/typescript/scripts/pack\-check/server\-v2\.ts$''']
-
-[[allowlists]]
-description = "The SDK's test module's fake key (an app-keys.json fixture) and the wire fixture's whsec_"
-targetRules = ["generic-api-key"]
-paths = ['''(^|/)sdk/typescript/src/testing\.ts$''']
-
-[[allowlists]]
-description = "One of app-keys.json's fixture app keys (made from patterned seeds), used as a test key"
-targetRules = ["generic-api-key"]
-paths = ['''(^|/)sdk/typescript/test/access\.test\.ts$''']
-
-[[allowlists]]
-description = "One of app-keys.json's fixture app keys (made from patterned seeds), used as a test key"
-targetRules = ["generic-api-key"]
-paths = ['''(^|/)sdk/typescript/test/attach\.test\.ts$''']
-
-[[allowlists]]
-description = "One of app-keys.json's fixture app keys (made from patterned seeds), used as a test key"
-targetRules = ["generic-api-key"]
-paths = ['''(^|/)sdk/typescript/test/clientrequests\.test\.ts$''']
-
-[[allowlists]]
-description = "One of app-keys.json's fixture app keys (made from patterned seeds), used as a test key; mcp-events-wire.json's fixture webhook secret (whsec_), with an example.com or agent.example URL"
-targetRules = ["generic-api-key"]
-paths = ['''(^|/)sdk/typescript/test/context\.test\.ts$''']
-
-[[allowlists]]
-description = "One of app-keys.json's fixture app keys (made from patterned seeds), used as a test key"
-targetRules = ["generic-api-key"]
-paths = ['''(^|/)sdk/typescript/test/disabled\.test\.ts$''']
-
-[[allowlists]]
-description = "One of app-keys.json's fixture app keys (made from patterned seeds), used as a test key"
-targetRules = ["generic-api-key"]
-paths = ['''(^|/)sdk/typescript/test/emit\.test\.ts$''']
-
-[[allowlists]]
-description = "One of app-keys.json's fixture app keys (made from patterned seeds), used as a test key"
-targetRules = ["generic-api-key"]
-paths = ['''(^|/)sdk/typescript/test/identity\.test\.ts$''']
-
-[[allowlists]]
-description = "mcp-events-wire.json's fixture webhook secret (whsec_), with an example.com or agent.example URL"
-targetRules = ["generic-api-key"]
-paths = ['''(^|/)sdk/typescript/test/interop\.test\.ts$''']
-
-[[allowlists]]
-description = "One of app-keys.json's fixture app keys (made from patterned seeds), used as a test key"
-targetRules = ["generic-api-key"]
-paths = ['''(^|/)sdk/typescript/test/push\.test\.ts$''']
-
-[[allowlists]]
-description = "One of app-keys.json's fixture app keys (made from patterned seeds), used as a test key, as the canary"
-targetRules = ["generic-api-key"]
-paths = ['''(^|/)sdk/typescript/test/secrets\.test\.ts$''']
-
-[[allowlists]]
-description = "One of app-keys.json's fixture app keys (made from patterned seeds), used as a test key"
-targetRules = ["generic-api-key"]
-paths = ['''(^|/)sdk/typescript/test/stdio\.test\.ts$''']
-
-[[allowlists]]
-description = "One of app-keys.json's fixture app keys (made from patterned seeds), used as a test key"
-targetRules = ["generic-api-key"]
-paths = ['''(^|/)sdk/typescript/test/subscribing\.test\.ts$''']
-
-[[allowlists]]
-description = "One of app-keys.json's fixture app keys (made from patterned seeds), used as a test key; mcp-events-wire.json's fixture webhook secret (whsec_), with an example.com or agent.example URL"
-targetRules = ["generic-api-key"]
-paths = ['''(^|/)sdk/typescript/test/testing\.test\.ts$''']
-
-[[allowlists]]
-description = "One of app-keys.json's fixture app keys (made from patterned seeds), used as a test key"
-targetRules = ["generic-api-key"]
-paths = ['''(^|/)sdk/typescript/test/tools\.test\.ts$''']
-
-[[allowlists]]
-description = "One of app-keys.json's fixture app keys (made from patterned seeds), used as a test key; mcp-events-wire.json's fixture webhook secret (whsec_), with an example.com or agent.example URL"
-targetRules = ["generic-api-key"]
-paths = ['''(^|/)sdk/typescript/test/vouchers\.test\.ts$''']
-
-[[allowlists]]
-description = "One of app-keys.json's fixture app keys (made from patterned seeds), used as a test key"
-targetRules = ["generic-api-key"]
-paths = ['''(^|/)sdk/typescript/test/watch\.test\.ts$''']
-
-[[allowlists]]
-description = "Made-up wrong development sign-in tokens the test checks are refused"
-targetRules = ["generic-api-key"]
-paths = ['''(^|/)internal/auth/dev_test\.go$''']
+condition = "AND"
+regexes = ['''^Ed25519PrivateKey$''']
+paths = ['''(^|/)sdk/python/src/wakeshift/_key\.py$''']

@@ -5,7 +5,7 @@
 // It was also "Sign in with Wakeshift", Wakeshift as the OAuth 2.1
 // authorization server for apps' agents, giving an app a grant in a
 // person's own workspace through Wakeshift's consent screen (account mode,
-// accounts: "wakeshift"). That's turned off (October 2026): no app gets a
+// accounts: "wakeshift"). That's turned off: no app gets a
 // grant in a person's own workspace. Its endpoints answer with a refusal
 // rather than disappearing, so a client left configured for it is told
 // why: authorize (invalid_target), token, including the token exchange

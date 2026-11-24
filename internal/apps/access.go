@@ -196,10 +196,12 @@ func (r *Registry) create(ctx context.Context, tx pgx.Tx, user, org string, n Ne
 	}
 	var k Key
 	var key string
+	from := keyOrigin{by: userActor(user), role: role}
 	if pub != nil {
-		k, err = insertPublicKey(ctx, tx, n.ID, keyName, pub, userActor(user))
+		from.via = ViaCLILink
+		k, err = insertPublicKey(ctx, tx, n.ID, keyName, pub, from)
 	} else {
-		k, key, err = r.insertKey(ctx, tx, n.ID, keyName, userActor(user))
+		k, key, err = r.insertKey(ctx, tx, n.ID, keyName, from)
 	}
 	if err != nil {
 		return Owned{}, Key{}, "", err

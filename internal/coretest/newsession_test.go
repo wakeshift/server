@@ -14,7 +14,7 @@ import (
 )
 
 // Claude Code's hooks, a conversation that watches the same app again
-// without its session key (a new session, wakebench S15's step d): the
+// without its session key (a new session): the
 // hooks connect the new session and the old one ends, so each publish
 // reaches the conversation once, and what the old session still held goes
 // to the new one rather than being lost. Before, the redeem was refused

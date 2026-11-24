@@ -1,5 +1,5 @@
 // Package hookproof is what a connector hook's own key signs for redeem
-// by call (docs/harnesses.md, "Redeem by call"): the core (appapi) checks
+// by call: the core (appapi) checks
 // it, the hook (connector) makes it. Exported with the connector.
 package hookproof
 

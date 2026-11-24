@@ -41,7 +41,7 @@ func (c *Console) onWaitlist(w http.ResponseWriter, entry string) {
 
 // waitlistEntry is the entry the request's cookie names, if it's valid.
 func (c *Console) waitlistEntry(r *http.Request) (string, bool) {
-	ck, err := r.Cookie(waitlistCookie)
+	ck, err := r.Cookie(c.cookieName(waitlistCookie))
 	var cl waitlistClaims
 	if err != nil || !c.verify("waitlist", ck.Value, &cl) || cl.Entry == "" || c.now().Unix() > cl.Exp {
 		return "", false

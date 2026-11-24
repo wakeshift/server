@@ -267,8 +267,8 @@ func readPinAt(root, harness string) (p Pin, ok bool, err error) {
 // WAKESHIFT_CONNECTOR_MIN_VERSIONS) requires for their harness: a user of
 // such a plugin would be refused by the core and told to update to a plugin
 // version that can't help. The release pins them to its connector, and a
-// change that raises a minimum is refused until they're pinned
-// (.github/workflows/agent-plugins.yml).
+// change that raises a minimum is refused until they're pinned (the
+// release pipeline checks it).
 func Below(dir string, minimums connectorversion.Minimums) ([]string, error) {
 	var l []string
 	for _, h := range Harnesses() {

@@ -199,7 +199,7 @@ func TestCallbackAddresses(t *testing.T) {
 	}
 	// Tests' AllowLoopback admits plain http to loopback hosts only: any
 	// other http callback is refused as it is in production.
-	AllowLoopback = true
+	SetAllowLoopback(true)
 	for _, u := range []string{"http://example.com/cb", "http://8.8.8.8/cb", "http://10.0.0.1/cb", "http://localhost.example.com/cb", "http://[2001:db8::1]/cb"} {
 		if CheckURL(u) == nil {
 			t.Errorf("with AllowLoopback, CheckURL(%q) accepted", u)
@@ -210,7 +210,7 @@ func TestCallbackAddresses(t *testing.T) {
 			t.Errorf("with AllowLoopback, CheckURL(%q): %v", u, err)
 		}
 	}
-	AllowLoopback = false
+	SetAllowLoopback(false)
 	for _, u := range []string{"http://127.0.0.1:8080/cb", "http://localhost:3000/cb"} {
 		if CheckURL(u) == nil {
 			t.Errorf("without AllowLoopback, CheckURL(%q) accepted", u)
@@ -227,8 +227,8 @@ func TestCallbackAddresses(t *testing.T) {
 // Verification sends a signed challenge and needs it echoed; redirects
 // aren't followed.
 func TestVerify(t *testing.T) {
-	AllowLoopback = true
-	defer func() { AllowLoopback = false }()
+	SetAllowLoopback(true)
+	defer func() { SetAllowLoopback(false) }()
 	secret := make([]byte, 32)
 	secret[0] = 7
 	var mode string
@@ -379,8 +379,8 @@ func TestBackoff(t *testing.T) {
 	for n := 1; n < MaxAttempts; n++ {
 		total += Backoff(n) + Timeout
 	}
-	if total+Timeout > RetryWindow {
-		t.Fatalf("%d attempts take %v, over the %v window", MaxAttempts, total+Timeout, RetryWindow)
+	if total+Timeout > RetryWindow() {
+		t.Fatalf("%d attempts take %v, over the %v window", MaxAttempts, total+Timeout, RetryWindow())
 	}
 	if SubscriptionID("t", "s", "https://a", "chat.message") != SubscriptionID("t", "s", "https://a", "chat.message") ||
 		SubscriptionID("t", "s", "https://a", "chat.message") == SubscriptionID("t", "s", "https://b", "chat.message") {

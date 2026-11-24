@@ -55,13 +55,12 @@ import (
 )
 
 // GrokHooks is Grok Bot's webhook wake's configuration. Zero fields take
-// the defaults (the design's recommendations; WAKESHIFT_GROK_* settings).
+// the defaults (WAKESHIFT_GROK_* settings set them).
 type GrokHooks struct {
 	// Links makes and reads the setup page's tokens; Proofs, challenges.
 	Links  *agenthooks.SetupLinks
 	Proofs *botkeys.Codec
-	// LinkTTL is how long a setup link works (default 24h; open question
-	// 10).
+	// LinkTTL is how long a setup link works (default 24h).
 	LinkTTL time.Duration
 	// MaxAttempts is how many failed attempts end a setup link (default 5).
 	MaxAttempts int
@@ -72,8 +71,9 @@ type GrokHooks struct {
 	ProxyHops int
 	// RateLimits turns the request limits on (WAKESHIFT_GROK_RATE_LIMITS;
 	// off by default until there's data): the per-address limits on saves,
-	// describes and failed checks, the per-link save limit and the per-user
-	// bind cap. Off, no client address is read or stored. The tokens' own
+	// describes and the page's failed checks, the per-link save limit and
+	// the per-user bind cap. Off, no client address is read or stored. The
+	// proof and challenge routes have no limit per address either way. The tokens' own
 	// limits (5 failed attempts per link, 3 failed proofs per challenge,
 	// single use, expiry, the body cap) and the identical refusals hold
 	// either way, and so do delivery pacing and the failed-proofs alert.
@@ -97,15 +97,21 @@ type GrokLimits struct {
 	// DescribePerAddress: the page's describe, which it polls (120 per
 	// address per 10 minutes).
 	DescribePerAddress dblimit.Limit
-	// FailuresPerAddress: failed token or challenge checks on describe,
-	// save and proof (20 per address per 10 minutes); past it every token
-	// or challenge from the address is refused as an invalid one would be.
+	// FailuresPerAddress: failed token checks on describe and save (20 per
+	// address per 10 minutes); past it every token from the address is
+	// refused as an invalid one would be. Proofs don't count and aren't
+	// refused by it: bots' VMs may share outbound addresses, and a
+	// challenge's 128-bit nonce and its 3 failed proofs already end
+	// guessing.
 	FailuresPerAddress dblimit.Limit
 	// BindsPerUser: webhooks bound through the page per user (10 a day).
 	BindsPerUser dblimit.Limit
 	// FailedProofs: failed proofs across Wakeshift (30 an hour) that raise
-	// an internal alert. It never refuses anything: bots' VMs may share
-	// outbound addresses, so proofs have no limit per address.
+	// an internal alert: signatures that don't verify on real, open
+	// challenges, which only a holder of a challenge can send. Malformed or
+	// unknown challenges, which anyone can send, don't count. It never
+	// refuses anything: bots' VMs may share outbound addresses, so proofs
+	// have no limit per address.
 	FailedProofs dblimit.Limit
 }
 
@@ -171,9 +177,10 @@ func (a *API) grokOn() bool {
 	return true
 }
 
-// grokInstall is how a Grok Bot's VM gets the connector from here.
-func (a *API) grokInstall() harnesses.GrokInstall {
-	in := harnesses.GrokInstall{Base: a.base()}
+// grokInstall is how a Grok Bot's VM gets the connector from here, in
+// app's results (its register challenges' prove commands pin it).
+func (a *API) grokInstall(app string) harnesses.GrokInstall {
+	in := harnesses.GrokInstall{Base: a.base(), App: app}
 	if a.Downloads != nil {
 		in.Command = a.Downloads.GrokInstallCommand()
 	}
@@ -223,7 +230,7 @@ func (a *API) grokResult(ctx context.Context, tx pgx.Tx, cv *conversation, h har
 	// which asks for it. The key step comes with the next subscribing
 	// result that has it.
 	bot := s.Conversation
-	if !botkeys.BotIDOK(bot) || !a.grokInstall().OK() {
+	if !botkeys.BotIDOK(bot) || !a.grokInstall("").OK() {
 		// No bot ID yet, or the connector isn't built here for a Grok
 		// Bot's VM: foreground waiting.
 		return a.foregroundResult(ctx, tx, cv, h, why)
@@ -271,7 +278,7 @@ func (a *API) grokResult(ctx context.Context, tx pgx.Tx, cv *conversation, h har
 		if err != nil {
 			return out, err
 		}
-		out.Text = join(harnesses.GrokPendingNote(app, link, su.ExpiresAt, a.grokInstall(), bot, reg, fg), passSession(cv))
+		out.Text = join(harnesses.GrokPendingNote(app, link, su.ExpiresAt, a.grokInstall(cv.app.ID), bot, reg, fg), passSession(cv))
 		return out, nil
 	}
 	if missing {
@@ -279,7 +286,7 @@ func (a *API) grokResult(ctx context.Context, tx pgx.Tx, cv *conversation, h har
 		if err != nil {
 			return out, err
 		}
-		out.Text = join(harnesses.GrokKeyMissingNote(app, a.grokInstall(), bot, challengeID(ch), fg), passSession(cv))
+		out.Text = join(harnesses.GrokKeyMissingNote(app, a.grokInstall(cv.app.ID), bot, challengeID(ch), fg), passSession(cv))
 		return out, nil
 	}
 	if hasKey && key.Bot == bot {
@@ -301,10 +308,10 @@ func (a *API) grokResult(ctx context.Context, tx pgx.Tx, cv *conversation, h har
 				return out, err
 			}
 			if dead {
-				out.Text = join(harnesses.GrokDeadNote(app, d.DeadReason, a.grokInstall(), bot, reg, link, a.Grok.LinkTTL, fg), passSession(cv))
+				out.Text = join(harnesses.GrokDeadNote(app, d.DeadReason, a.grokInstall(cv.app.ID), bot, reg, link, a.Grok.LinkTTL, fg), passSession(cv))
 			} else {
 				// Asked before: the brief text, with a new link for the same key.
-				out.Text = join(harnesses.GrokPendingNote(app, link, su.ExpiresAt, a.grokInstall(), bot, reg, fg), passSession(cv))
+				out.Text = join(harnesses.GrokPendingNote(app, link, su.ExpiresAt, a.grokInstall(cv.app.ID), bot, reg, fg), passSession(cv))
 			}
 			return out, nil
 		}
@@ -313,7 +320,7 @@ func (a *API) grokResult(ctx context.Context, tx pgx.Tx, cv *conversation, h har
 	if err != nil {
 		return out, err
 	}
-	out.Text = join(harnesses.GrokKeyNote(app, a.grokInstall(), bot, challengeID(ch), fg), passSession(cv))
+	out.Text = join(harnesses.GrokKeyNote(app, a.grokInstall(cv.app.ID), bot, challengeID(ch), fg), passSession(cv))
 	return out, nil
 }
 
@@ -521,8 +528,9 @@ type boundFollowUp struct {
 	hook            agenthooks.CursorHook
 	pub             ed25519.PublicKey
 	binding         []byte
-	rekey           bool
-	peers           []agenthooks.Peer
+	// peers: the other destinations on the bind's own key, when the bind
+	// was a re-setup by that key (grokBind).
+	peers []agenthooks.Peer
 }
 
 // grokProof is POST /v1/stream/proof (form fields, as curl -F sends them):
@@ -534,20 +542,11 @@ func (a *API) grokProof(w http.ResponseWriter, r *http.Request) {
 		grokOff(w)
 		return
 	}
-	// No limit per address: bots' VMs may share outbound addresses. Only
-	// an address's failed challenge checks are limited, and refused as a
-	// challenge that's gone would be.
+	// No limit per address, not even on failed checks: bots' VMs may share
+	// outbound addresses, so one bot's failures (or someone's garbage)
+	// must not lock out another's proofs. A challenge's 128-bit nonce, and
+	// its end after 3 failed proofs, are what stop guessing.
 	ctx := r.Context()
-	addr := a.grokAddr(r)
-	if blocked, err := a.grokBlocked(ctx, addr); err != nil {
-		slog.Error("grok webhooks: checking the failure limit failed", "err", err)
-		grokText(w, http.StatusServiceUnavailable, "Something went wrong at Wakeshift. Run the command again in a minute.")
-		return
-	} else if blocked {
-		slog.Info("grok webhooks: proof refused", "reason", "too_many_failures")
-		grokText(w, http.StatusUnauthorized, harnesses.GrokChallengeGone)
-		return
-	}
 	body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, grokMaxBody))
 	if err != nil {
 		grokText(w, http.StatusRequestEntityTooLarge, "That request was too large. Run the command exactly as given.")
@@ -562,33 +561,37 @@ func (a *API) grokProof(w http.ResponseWriter, r *http.Request) {
 	}
 	r.Body = io.NopCloser(bytes.NewReader(body))
 	if err := r.ParseMultipartForm(grokMaxBody); err != nil && !errors.Is(err, http.ErrNotMultipart) {
-		// A failed challenge check like any other, for the address's limit.
-		a.grokCheckFailed(ctx, addr)
 		grokText(w, http.StatusBadRequest, "That request wasn't the form the command sends. Run the command exactly as given.")
 		return
 	}
 	ch, err := botkeys.Parse(r.PostFormValue("challenge"))
 	if err != nil {
 		slog.Info("grok webhooks: proof refused", "reason", "malformed")
-		a.grokCheckFailed(ctx, addr)
-		a.grokProofFailed(ctx, "")
+		grokText(w, http.StatusUnauthorized, harnesses.GrokChallengeGone)
+		return
+	}
+	// A nonce Wakeshift didn't derive (a made-up challenge) is refused
+	// before the database: guessing costs no lookup.
+	if !a.Grok.Proofs.Authentic(ch) {
+		slog.Info("grok webhooks: proof refused", "reason", "forged")
 		grokText(w, http.StatusUnauthorized, harnesses.GrokChallengeGone)
 		return
 	}
 	missing := strings.TrimSpace(r.PostFormValue("missing")) == "1"
+	// v=2: a connector that was shown the register challenge's workspace
+	// and app (grokFetch) signs them too (botkeys.RegisterMessage).
+	v2 := strings.TrimSpace(r.PostFormValue("v")) == "2"
 	pub, pubErr := botkeys.ParsePublicKey(r.PostFormValue("public_key"))
 	sig, sigOK := botkeys.ParseSignature(r.PostFormValue("signature"))
 	var ans grokAnswer
 	err = a.DB.InTenant(ctx, ch.Tenant, func(tx pgx.Tx) error {
 		var err error
-		ans, err = a.proveTx(ctx, tx, ch, missing, pub, pubErr == nil, sig, sigOK)
+		ans, err = a.proveTx(ctx, tx, ch, missing, v2, pub, pubErr == nil, sig, sigOK)
 		return err
 	})
 	switch {
 	case errors.Is(err, errGrokRefused):
 		slog.Info("grok webhooks: proof refused", "reason", cmpOr(ans.logOutcome, "challenge_refused"), "app", ans.app)
-		a.grokCheckFailed(ctx, addr)
-		a.grokProofFailed(ctx, ans.app)
 		grokText(w, http.StatusUnauthorized, harnesses.GrokChallengeGone)
 		return
 	case err != nil:
@@ -599,7 +602,7 @@ func (a *API) grokProof(w http.ResponseWriter, r *http.Request) {
 	if ans.failed {
 		// A signature that doesn't verify on a real challenge: limited per
 		// challenge and per link (botkeys.MaxFailures, MaxAttempts), not
-		// per address.
+		// per address, and the only failure the alert counts.
 		a.grokProofFailed(ctx, ans.app)
 	}
 	if ans.join != nil {
@@ -704,12 +707,59 @@ func (a *API) grokFetch(w http.ResponseWriter, r *http.Request) {
 		none()
 		return
 	}
+	text := a.Grok.Proofs.Challenge(purpose, found.Tenant, found.ID)
+	if purpose == botkeys.Register && strings.TrimSpace(r.PostFormValue("v")) == "2" {
+		// A v2 connector shows which app, in which workspace, the proof
+		// goes to, refuses another app than its command pins (--app), and
+		// signs both (botkeys.RegisterMessage).
+		var about string
+		err := a.DB.InTenant(ctx, found.Tenant, func(tx pgx.Tx) error {
+			var err error
+			about, err = registerAbout(ctx, tx, found.Tenant, found.ID)
+			return err
+		})
+		if errors.Is(err, pgx.ErrNoRows) {
+			slog.Info("grok webhooks: challenge fetched", "outcome", "none", "purpose", purpose)
+			none()
+			return
+		}
+		if err != nil {
+			slog.Error("grok webhooks: fetching a challenge failed", "err", err)
+			grokText(w, http.StatusServiceUnavailable, "Something went wrong at Wakeshift. Run the command again in a minute.")
+			return
+		}
+		text += "\n" + about
+	}
 	slog.Info("grok webhooks: challenge fetched", "outcome", "given", "purpose", purpose)
-	grokText(w, http.StatusOK, a.Grok.Proofs.Challenge(purpose, found.Tenant, found.ID))
+	grokText(w, http.StatusOK, text)
+}
+
+// registerAbout is what a v2 fetch of a register challenge adds, one
+// "key=value" line each: the app's ID and name, and the workspace's ID,
+// name and, for a workspace an app owns, that app's ID. Names are one line
+// (framing.Name).
+func registerAbout(ctx context.Context, tx pgx.Tx, tenant, id string) (string, error) {
+	var app string
+	if err := tx.QueryRow(ctx, `SELECT app_id FROM bot_challenges WHERE id = $1`, id).Scan(&app); err != nil {
+		return "", err
+	}
+	var name, owner string
+	if err := tx.QueryRow(ctx, `SELECT name, coalesce(app_id, '') FROM tenants WHERE id = $1`, tenant).Scan(&name, &owner); err != nil {
+		return "", err
+	}
+	ws := framing.Name(name)
+	if strings.TrimSpace(name) == "" {
+		ws = tenant
+	}
+	lines := []string{"app_id=" + app, "app=" + appNameTx(ctx, tx, app), "workspace_id=" + tenant, "workspace=" + ws}
+	if owner != "" {
+		lines = append(lines, "workspace_app="+owner)
+	}
+	return strings.Join(lines, "\n"), nil
 }
 
 // proveTx is a proof's transaction, in the challenge's workspace.
-func (a *API) proveTx(ctx context.Context, tx pgx.Tx, ch botkeys.Challenge, missing bool, pub ed25519.PublicKey, pubOK bool, sig []byte, sigOK bool) (grokAnswer, error) {
+func (a *API) proveTx(ctx context.Context, tx pgx.Tx, ch botkeys.Challenge, missing, v2 bool, pub ed25519.PublicKey, pubOK bool, sig []byte, sigOK bool) (grokAnswer, error) {
 	var ans grokAnswer
 	row, err := botkeys.Lock(ctx, tx, ch)
 	if errors.Is(err, botkeys.ErrUnknown) {
@@ -768,7 +818,7 @@ func (a *API) proveTx(ctx context.Context, tx pgx.Tx, ch botkeys.Challenge, miss
 	}
 
 	if missing {
-		return a.keyMissing(ctx, tx, tenant, s, row, appName, fg)
+		return a.keyMissing(ctx, tx, tenant, s, row, appName)
 	}
 
 	// The key a setup proof must be signed by is the one its link was
@@ -789,7 +839,17 @@ func (a *API) proveTx(ctx context.Context, tx pgx.Tx, ch botkeys.Challenge, miss
 			sigOK = false // signed by another key than the link's
 		}
 	}
-	if !sigOK || (row.Purpose == botkeys.Register && !pubOK) || !botkeys.Verify(verifyWith, row.Bot, challenge, sig) {
+	verified := false
+	switch {
+	case !sigOK || (row.Purpose == botkeys.Register && !pubOK):
+	case row.Purpose == botkeys.Register && v2:
+		// Signed with the workspace and app the connector showed: this
+		// workspace and the challenge's app, or it doesn't verify.
+		verified = botkeys.VerifyRegister(verifyWith, row.Bot, challenge, tenant, row.App, sig)
+	default:
+		verified = botkeys.Verify(verifyWith, row.Bot, challenge, sig)
+	}
+	if !verified {
 		if row.Purpose == botkeys.Setup {
 			// The run the webhook started can't sign for this bot: the
 			// webhook starts runs elsewhere (a leaked link pasted with
@@ -805,16 +865,18 @@ func (a *API) proveTx(ctx context.Context, tx pgx.Tx, ch botkeys.Challenge, miss
 			ans.status, ans.text, ans.logOutcome, ans.failed = http.StatusUnauthorized, harnesses.GrokSetupMismatchNote, "setup_mismatch", true
 			return ans, nil
 		}
+		// A signature that doesn't verify earns no more than the challenge
+		// itself did: not the session's wait URL (fg).
 		ended, err := botkeys.Fail(ctx, tx, row.ID)
 		if err != nil {
 			return ans, err
 		}
 		ans.status, ans.logOutcome, ans.failed = http.StatusUnauthorized, "bad_signature", true
 		if ended {
-			ans.text = fg
+			ans.text = harnesses.GrokChallengeGone
 			return ans, nil
 		}
-		ans.text = harnesses.GrokBadSignatureNote(fg)
+		ans.text = harnesses.GrokBadSignatureNote
 		return ans, nil
 	}
 	if err := botkeys.Use(ctx, tx, row.ID); err != nil {
@@ -851,12 +913,33 @@ func (a *API) setupBoundBy(ctx context.Context, tx pgx.Tx, row botkeys.Row, chal
 // subscribing results offer the new key while the attempt is open
 // (setupKeyMissing). On a register challenge, the session (only this
 // one: a report marks only the session whose challenge carried it) needs
-// setup: its destination stops receiving POSTs and its messages wait for
-// the foreground wait.
-func (a *API) keyMissing(ctx context.Context, tx pgx.Tx, tenant string, s sessions.Session, row botkeys.Row, appName, fg string) (grokAnswer, error) {
+// setup in what its subscribing results say.
+//
+// A report is unsigned (the key is gone), so anyone holding the challenge
+// could send one: it changes no stored key and no destination. A session
+// whose bot registered a key keeps it, and its webhook keeps delivering,
+// until a proof by a new key is bound through the page; a session without
+// one has nothing to change. Nor does the answer repeat the foreground
+// command, which only a proof earns.
+func (a *API) keyMissing(ctx context.Context, tx pgx.Tx, tenant string, s sessions.Session, row botkeys.Row, appName string) (grokAnswer, error) {
+	fg := harnesses.GrokForegroundAsGiven
 	var ans grokAnswer
 	if _, err := tx.Exec(ctx, `UPDATE bot_challenges SET used_at = now(), missing = true WHERE id = $1`, row.ID); err != nil {
 		return ans, err
+	}
+	// The answer says what's true: with the session's webhook live, wake-ups
+	// go on (delivery doesn't need the key), and the key is needed only to
+	// change the setup; without one, they're off until it's set up again.
+	d, has, err := agenthooks.Get(ctx, tx, s.ID)
+	if err != nil {
+		return ans, err
+	}
+	live := has && d.Kind == agenthooks.KindCursor && d.State == agenthooks.Live && !d.NeedsSetup
+	note := func(ch string) string {
+		if live {
+			return harnesses.GrokKeyMissingLiveNote(appName, a.grokInstall(row.App), row.Bot, challengeID(ch))
+		}
+		return harnesses.GrokKeyMissingNote(appName, a.grokInstall(row.App), row.Bot, challengeID(ch), fg)
 	}
 	if row.Purpose == botkeys.Setup {
 		if _, err := tx.Exec(ctx, `UPDATE agent_webhook_setups SET sealed = NULL, challenge_id = NULL, proof_due = NULL, failures = failures + 1, last_error = 'key_missing'
@@ -867,21 +950,14 @@ func (a *API) keyMissing(ctx context.Context, tx pgx.Tx, tenant string, s sessio
 		if err != nil {
 			return ans, err
 		}
-		ans.text, ans.logOutcome = harnesses.GrokKeyMissingNote(appName, a.grokInstall(), row.Bot, challengeID(ch), fg), "key_missing_setup"
+		ans.text, ans.logOutcome = note(ch), "key_missing_setup"
 		return ans, nil
-	}
-	if err := botkeys.MarkMissing(ctx, tx, s.ID); err != nil {
-		return ans, err
-	}
-	if _, err := tx.Exec(ctx, `UPDATE agent_webhooks SET needs_setup_at = coalesce(needs_setup_at, now()) WHERE session_id = $1 AND kind = $2`,
-		s.ID, agenthooks.KindCursor); err != nil {
-		return ans, err
 	}
 	ch, _, err := a.Grok.Proofs.Issue(ctx, tx, tenant, botkeys.Register, s.ID, row.Bot, row.App, row.Grant, "")
 	if err != nil {
 		return ans, err
 	}
-	ans.text, ans.logOutcome = harnesses.GrokKeyMissingNote(appName, a.grokInstall(), row.Bot, challengeID(ch), fg), "key_missing"
+	ans.text, ans.logOutcome = note(ch), "key_missing"
 	return ans, nil
 }
 
@@ -945,7 +1021,7 @@ func (a *API) registered(ctx context.Context, tx pgx.Tx, tenant string, s sessio
 		if needsSetup {
 			ans.text, ans.logOutcome = harnesses.GrokWebhookNote(appName, a.base(), row.Bot, link, a.Grok.LinkTTL, fg), "rekey_after_missing"
 		} else {
-			ans.text, ans.logOutcome = harnesses.GrokRekeyNote(link, fg), "rekey"
+			ans.text, ans.logOutcome = harnesses.GrokRekeyNote(botkeys.Short(key.Fingerprint), botkeys.Short(fp), link, fg), "rekey"
 		}
 		return ans, nil
 	}
@@ -1102,17 +1178,18 @@ func (a *API) grokBind(ctx context.Context, tx pgx.Tx, tenant string, s sessions
 		return ans, err
 	}
 	pub := ed25519.PublicKey(su.Public)
-	key, hasKey, err := botkeys.GetKey(ctx, tx, s.ID)
+	_, hasKey, err := botkeys.GetKey(ctx, tx, s.ID)
 	if err != nil {
 		return ans, err
 	}
-	var peerKeys [][]byte
-	if hadOld && old.Kind == agenthooks.KindCursor && len(old.Fingerprint) > 0 {
-		peerKeys = append(peerKeys, old.Fingerprint)
-	}
-	if hasKey && !bytes.Equal(key.Fingerprint, su.Fingerprint) {
-		peerKeys = append(peerKeys, key.Fingerprint)
-	}
+	// A re-setup of the session's webhook by the same key carries over to
+	// the other destinations on that key (the proof was by it). A bind by
+	// another key (a rekey) carries nothing by key: the old key's other
+	// destinations are other apps', and a proof by a new key, from this
+	// session, says nothing about them, so they stay as they are. Those on
+	// this webhook's routine follow it by the routine (carryRoutine), whose
+	// own run proved the new key.
+	resetup := hadOld && old.Kind == agenthooks.KindCursor && bytes.Equal(old.Fingerprint, su.Fingerprint)
 	if replaced, err := botkeys.PutKey(ctx, tx, s.ID, su.Bot, su.App, pub); err != nil {
 		return ans, err
 	} else if replaced != nil {
@@ -1151,8 +1228,8 @@ func (a *API) grokBind(ctx context.Context, tx pgx.Tx, tenant string, s sessions
 		return ans, err
 	}
 	var peers []agenthooks.Peer
-	for _, k := range peerKeys {
-		ps, err := agenthooks.PeersByKey(ctx, tx, k)
+	if resetup {
+		ps, err := agenthooks.PeersByKey(ctx, tx, su.Fingerprint)
 		if err != nil {
 			return ans, err
 		}
@@ -1164,32 +1241,31 @@ func (a *API) grokBind(ctx context.Context, tx pgx.Tx, tenant string, s sessions
 	}
 	ans.text, ans.logOutcome = harnesses.GrokBoundNote(appName), "bound"
 	ans.proofMs = time.Since(row.CreatedAt).Milliseconds()
-	ans.bound = &boundFollowUp{tenant: tenant, session: s.ID, agent: s.Agent, bot: su.Bot, hook: hook, pub: pub, binding: binding, routine: routine,
-		rekey: su.Rekey || len(peerKeys) > 0, peers: peers}
+	ans.bound = &boundFollowUp{tenant: tenant, session: s.ID, agent: s.Agent, bot: su.Bot, hook: hook, pub: pub, binding: binding, routine: routine, peers: peers}
 	return ans, nil
 }
 
 // grokPropagate carries a bind over to the bot's other workspaces on the
-// same webhook (found through the index by the key it had): the user set
-// up the bot's webhook again, so each gets its new URL and key and, if it
-// changed, the bot's new key, each in its own workspace, audited there.
+// same webhook: the user set up the bot's webhook again, so each gets its
+// new URL and key, each in its own workspace, audited there. By key
+// (b.peers), only live destinations on the bind's own key follow, and
+// their key doesn't change; by routine, every destination on the
+// webhook's routine follows, with the key the routine's run proved.
 func (a *API) grokPropagate(ctx context.Context, b boundFollowUp) {
 	bg := context.WithoutCancel(ctx)
 	seen := map[agenthooks.Peer]bool{{Tenant: b.tenant, Session: b.session}: true}
-	// The destinations on the bot's old key (a webhook moved to a new
+	// The live destinations on the bind's key (a webhook moved to a new
 	// routine takes them along), then every destination on the routine
 	// still on another binding, round after round until none is left: a
 	// join that read the old binding before this bind commits lands on the
 	// routine and is found by the next round.
-	if b.rekey {
-		for _, p := range b.peers {
-			if seen[p] {
-				continue
-			}
-			seen[p] = true
-			if goOn, _ := a.carryOver(bg, b, p); !goOn {
-				return
-			}
+	for _, p := range b.peers {
+		if seen[p] {
+			continue
+		}
+		seen[p] = true
+		if goOn, _ := a.carryOver(bg, b, p, carryByKey); !goOn {
+			return
 		}
 	}
 	a.carryRoutine(bg, b)
@@ -1210,7 +1286,7 @@ func (a *API) carryRoutine(ctx context.Context, b boundFollowUp) int {
 			return n
 		}
 		for _, p := range stale {
-			goOn, carried := a.carryOver(ctx, b, p)
+			goOn, carried := a.carryOver(ctx, b, p, carryByURL)
 			if carried {
 				n++
 			}
@@ -1289,13 +1365,34 @@ func (a *API) FinishGrokCarryOvers(ctx context.Context) (int, error) {
 	return n, nil
 }
 
+// carryMode is how a carry-over found the destination it may rewrite,
+// which decides which destinations it may reach (carryOver).
+type carryMode int
+
+const (
+	// carryByURL: on the bind's routine (its webhook URL), whose own run
+	// proved the bind's key, so any destination there follows, new key
+	// included.
+	carryByURL carryMode = iota
+	// carryByKey: by the bind's key only, so only a live destination
+	// already on that same key follows, and its key never changes.
+	carryByKey
+)
+
 // carryOver gives one destination the bind's webhook, key and binding
 // (BindingID), in its own workspace, audited there, while the bind is still the
 // routine's (its row locked for share: a newer bind waits, and then
 // carries over itself). It reports whether to go on (false once a newer
 // bind took the routine), and whether it carried the binding over (not
 // when the destination already had it).
-func (a *API) carryOver(ctx context.Context, b boundFollowUp, p agenthooks.Peer) (goOn, carried bool) {
+//
+// carryByKey: p was found by the bind's key, not on its routine. Then only a
+// live destination whose key (the session's and the destination's) is
+// the bind's own follows, and its key doesn't change: a proof by one key
+// never gives another app's destination a new key, and a destination the
+// user stopped (dead: its routine deleted) isn't revived by another app's
+// setup.
+func (a *API) carryOver(ctx context.Context, b boundFollowUp, p agenthooks.Peer, mode carryMode) (goOn, carried bool) {
 	fp := botkeys.Fingerprint(b.pub)
 	var agent string
 	superseded := false
@@ -1319,6 +1416,15 @@ func (a *API) carryOver(ctx context.Context, b boundFollowUp, p agenthooks.Peer)
 		d, has, err := agenthooks.Get(ctx, tx, p.Session)
 		if err != nil || !has || d.Kind != agenthooks.KindCursor || d.Bot != b.bot {
 			return err
+		}
+		if mode == carryByKey {
+			if d.State != agenthooks.Live || !bytes.Equal(d.Fingerprint, fp) {
+				return nil
+			}
+			key, has, err := botkeys.GetKey(ctx, tx, p.Session)
+			if err != nil || !has || !bytes.Equal(key.Fingerprint, fp) {
+				return err
+			}
 		}
 		s, err := sessions.Get(ctx, tx, p.Session)
 		if err != nil {
@@ -1520,6 +1626,9 @@ func (a *API) describeTx(ctx context.Context, tx pgx.Tx, ref agenthooks.Setup, s
 		}
 		out["app"] = appNameTx(ctx, tx, su.App)
 		out["bot_tail"] = tail(su.Bot, 6)
+		// The key the link binds, as the bot's connector prints it, so the
+		// user sees which key they're confirming.
+		out["key"] = botkeys.Short(su.Fingerprint)
 		out["expires_at"] = su.ExpiresAt.UTC().Format(time.RFC3339)
 		out["state"] = state
 		if su.LastError != "" && state == setupOpen {
@@ -1538,7 +1647,7 @@ func tail(s string, n int) string {
 
 // grokSetupSave is POST /v1/stream/webhook-setup {token, url, key}: the
 // user's paste. Wakeshift POSTs a fresh setup challenge through the
-// webhook (3.4): in a short transaction it claims the setup and keeps the
+// webhook: in a short transaction it claims the setup and keeps the
 // URL and key sealed on it, with the challenge; outside any transaction it
 // POSTs; then it records the outcome. The bind happens when the run's
 // proof comes (grokProof). Nothing is bound before.
@@ -1623,7 +1732,7 @@ func (a *API) grokSetupSave(w http.ResponseWriter, r *http.Request) {
 			}
 			return err
 		}
-		// The limits on saves that POST to Cursor (3.1), counted here, once
+		// The limits on saves that POST to Cursor (GrokLimits), counted here, once
 		// the link is known good and free, so a refused or busy save doesn't
 		// use them. A refusal commits: it still counts, and so does an
 		// expired attempt above.
@@ -1834,10 +1943,11 @@ func (a *API) grokCheckFailed(ctx context.Context, addr string) {
 	}
 }
 
-// grokProofFailed counts a failed proof across Wakeshift. The proof that
-// reaches FailedProofs in its window (exactly one, across instances) logs
-// the alert (the hosted deployment's grok_failed_proofs), naming the proof's app
-// if its challenge was real, and nothing else. It never refuses anything.
+// grokProofFailed counts a failed proof (a signature that doesn't verify
+// on a real challenge) across Wakeshift. The proof that reaches
+// FailedProofs in its window (exactly one, across instances) logs the
+// alert (the hosted deployment's grok_failed_proofs), naming the proof's
+// app, and nothing else. It never refuses anything.
 func (a *API) grokProofFailed(ctx context.Context, app string) {
 	ctx = context.WithoutCancel(ctx)
 	l := a.Grok.Limits.FailedProofs

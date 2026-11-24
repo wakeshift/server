@@ -130,8 +130,8 @@ func TestClaudeCodePluginMarkOutdated(t *testing.T) {
 
 // A marked watch by a route the plugin can't connect is never told the
 // plugin connects it: through Anthropic's connector proxy (an app added as
-// a claude.ai connector: clientInfo "claude-ai", and no tool call ID, as on
-// November 9, 2026, from the desktop app's Code tab), or from a client that
+// a claude.ai connector: clientInfo "claude-ai", and no tool call ID, as
+// observed from the desktop app's Code tab), or from a client that
 // names no tool call to bind a beacon to. Each gets the Monitor's command,
 // no install offer and no beacon (nothing on that route would redeem it),
 // and a later watch gets the command again, not the plugin's ask. The

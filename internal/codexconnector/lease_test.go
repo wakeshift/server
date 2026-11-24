@@ -13,10 +13,10 @@ import (
 	"github.com/coder/websocket"
 )
 
-// A study's pre-flight on 2026-11-14: a Codex thread subscribed, then sat
-// idle. An hour later its connector stopped ("nobody used the thread for
-// the lease"), and an event at 95 minutes woke nothing until the user typed
-// again. Claude Code's waiter would have waited 23 hours. While the
+// A Codex thread subscribed, then sat idle. An hour later its connector
+// stopped ("nobody used the thread for the lease"), and a later event woke
+// nothing until the user typed again, where Claude Code's waiter would
+// still have been waiting. While the
 // connector holds the thread's stream (Wakeshift ends it once the session
 // has no live subscription), the lease is renewed, up to Hold.
 

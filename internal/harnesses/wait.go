@@ -14,7 +14,7 @@ import (
 // the session's wait URL. It reads the conversation's link from the hooks'
 // own files, so the command is the same in every conversation and holds no
 // secret, and the exact rule the install added to the harness's allowlist
-// matches it (docs/harnesses.md, "Pre-approving Wakeshift's commands"). It
+// matches it. It
 // prints the same lines as the loops, and ends the same way (Cursor's
 // keeps running and ends after 50 messages with a hub.restart line; the
 // others end when messages arrive, confirming them first).
@@ -31,8 +31,8 @@ var waitCommandRE = regexp.MustCompile(`^/[A-Za-z0-9._/@+-]{1,500}/\.wakeshift/b
 
 // userRootRE is where a user's own files are, whoever's they are: a home
 // directory (/Users/<name>, /home/<name>, /root) or macOS's per-user
-// temporary directory (/var/folders/<xx>/<id>/T, 0700, where the bench
-// keeps its HOMEs). Anything else (/opt, /usr/local, /Users/Shared,
+// temporary directory (/var/folders/<xx>/<id>/T, 0700, where tests often
+// put a temporary HOME). Anything else (/opt, /usr/local, /Users/Shared,
 // /Library/Caches, /tmp) may be writable by other local users, so a binary
 // there may not be the user's own.
 var userRootRE = regexp.MustCompile(`^(?:/Users/[A-Za-z0-9._@+-]{1,64}|/home/[A-Za-z0-9._@+-]{1,64}|/root|(?:/private)?/var/folders/[A-Za-z0-9_+-]{1,8}/[A-Za-z0-9_+-]{1,64}/T)/`)

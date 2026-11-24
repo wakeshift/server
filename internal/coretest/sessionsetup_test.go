@@ -22,8 +22,8 @@ import (
 	"github.com/wakeshift/server/internal/streams"
 )
 
-// Session-only setup, sent when it's picked (appapi/sessionsetup.go;
-// docs/harnesses.md): Claude Code's offer asks the question and gives the
+// Session-only setup, sent when it's picked (appapi/sessionsetup.go):
+// Claude Code's offer asks the question and gives the
 // plugin's path, and for "this session" only a one-time URL whose answer
 // has the steps (the link file, the Monitor's one line in the wait's loop
 // mode).

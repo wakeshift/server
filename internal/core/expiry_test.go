@@ -57,9 +57,9 @@ func TestExpiryJobsCommitSeparately(t *testing.T) {
 }
 
 // Every expiry job runs bounded: its statements by jobStatementTimeout,
-// its transaction by jobTransactionTimeout. In production a job's statement
-// that planned badly ran for 25 hours, holding its locks and the snapshot
-// vacuum had to keep.
+// its transaction by jobTransactionTimeout, so a statement that plans
+// badly can't run for hours, holding its locks and the snapshot vacuum
+// has to keep.
 func TestExpiryJobsAreBounded(t *testing.T) {
 	ctx := context.Background()
 	d := dbtest.New(t)

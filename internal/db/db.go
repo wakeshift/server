@@ -107,14 +107,13 @@ func OpenWithOwner(ctx context.Context, url, ownerURL string, opts ...Option) (*
 // ALTER ROLE is lost when the role is made again) or the URL's options
 // say, and how the pool checks and replaces its connections.
 //
-// The server reaches Cloud SQL through the Cloud SQL connector: a Unix
-// socket on each side (Postgres logs the sessions as host=[local]) and
-// Google's tunnel between. Neither Postgres's tcp_keepalives_* nor the
-// driver's TCP keepalives apply to a Unix socket, so a connection whose
-// tunnel stalls looks alive to both ends (2026-11-12: a subscribe held its
-// locks for 67 s with nothing running, and 98 s of requests queued
-// behind it). What ends one is these timeouts, on the server's side, and
-// the pool's ping, on ours.
+// The server may reach Postgres through a proxy such as the Cloud SQL
+// connector: a Unix socket on each side (Postgres logs the sessions as
+// host=[local]) and a tunnel between. Neither Postgres's tcp_keepalives_*
+// nor the driver's TCP keepalives apply to a Unix socket, so a connection
+// whose tunnel stalls looks alive to both ends, and a transaction on it
+// keeps its locks while requests queue behind it. What ends one is these
+// timeouts, on the server's side, and the pool's ping, on ours.
 func configure(cfg *pgxpool.Config) {
 	p := cfg.ConnConfig.RuntimeParams
 	ms := func(d time.Duration) string { return strconv.FormatInt(d.Milliseconds(), 10) }
@@ -221,9 +220,11 @@ var ErrRuntimeOwns = errors.New("the database role can alter the tables (it owns
 
 // migrateAsOwner migrates with the owner's connection, then grants runtime
 // (a role) the database's CONNECT and reads and writes on every table and
-// sequence, now and to come (default privileges), except updating audit_log
-// (append-only). The grants are made under the migration lock: instances
-// starting together would otherwise race on the same catalog rows.
+// sequence, now and to come (default privileges), except updating or
+// deleting from audit_log (append-only: erasing a workspace deletes its
+// audit log through erase_tenant, 170_erase_tenant.sql, which runtime may
+// call). The grants are made under the migration lock: instances starting
+// together would otherwise race on the same catalog rows.
 func migrateAsOwner(ctx context.Context, ownerURL, runtime string, files fs.FS, opts options) error {
 	cfg, err := pgxpool.ParseConfig(ownerURL)
 	if err != nil {
@@ -268,7 +269,8 @@ func migrateAsOwner(ctx context.Context, ownerURL, runtime string, files fs.FS, 
 			GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA public TO `+r+`;
 			ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES TO `+r+`;
 			ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT USAGE, SELECT ON SEQUENCES TO `+r+`;
-			REVOKE UPDATE ON audit_log FROM `+r+`;
+			REVOKE UPDATE, DELETE ON audit_log FROM `+r+`;
+			GRANT EXECUTE ON FUNCTION erase_tenant() TO `+r+`;
 			REVOKE UPDATE, DELETE ON admin_log FROM `+r+`;
 			REVOKE INSERT, UPDATE, DELETE ON schema_migrations FROM `+r)
 		if err != nil {

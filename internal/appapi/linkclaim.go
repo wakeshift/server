@@ -1,6 +1,6 @@
 package appapi
 
-// Link claims (#1152; docs/harnesses.md, "Link claims"). A background
+// Link claims (#1152). A background
 // command reads its conversation's link from a file (harnesses.LinkStep).
 // Cursor's command carries a one-time code, and the first time it runs,
 // finding no link file, it exchanges the code for the link and writes the

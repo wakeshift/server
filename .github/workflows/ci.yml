@@ -2,7 +2,8 @@ name: CI
 
 # Every pull request and every push to main: the Go tests against
 # Postgres, the console's type check and build, the release gate (the
-# quickstart, end to end, in Docker) and a secret scan.
+# quickstart, end to end, in Docker), the harness runner's tests, a secret
+# scan and a lint of these workflows.
 on:
   push:
     branches: [main]
@@ -27,7 +28,7 @@ jobs:
         shard: [coretest, rest]
     services:
       postgres:
-        image: postgres:17.11
+        image: postgres:17.11@sha256:ff87138949ad9a46f32ff23bd6852b52ce024a13dffe9b4087be98292cdd3b4f
         env:
           POSTGRES_PASSWORD: postgres
         ports:
@@ -39,6 +40,8 @@ jobs:
           --health-retries 20
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version-file: go.mod
@@ -68,6 +71,7 @@ jobs:
           else
             pkgs=$(go list ./... | grep -v '/internal/coretest')
           fi
+          # shellcheck disable=SC2086 # one package per word
           go test -race -timeout 30m $pkgs
 
   web:
@@ -76,6 +80,8 @@ jobs:
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: 26
@@ -94,6 +100,8 @@ jobs:
     timeout-minutes: 25
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version-file: go.mod
@@ -105,11 +113,12 @@ jobs:
   # check that a run would touch real agent configs, fails the job too.
   bench:
     name: Harness runner (unit tests, dry run)
-    if: hashFiles('bench/package.json') != ''
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version-file: go.mod
@@ -133,6 +142,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
+          persist-credentials: false
       - name: Install gitleaks
         env:
           VERSION: 8.30.1
@@ -145,3 +155,19 @@ jobs:
         run: |
           "$RUNNER_TEMP/gitleaks" git --redact --no-banner --exit-code 1 .
           "$RUNNER_TEMP/gitleaks" dir --redact --no-banner --exit-code 1 .
+
+  # These workflows (actionlint, with shellcheck on their run steps), pinned
+  # by version: Go's checksum database verifies the module.
+  actionlint:
+    name: Workflows (actionlint)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+      - name: actionlint
+        run: go run github.com/rhysd/actionlint/cmd/actionlint@v1.7.12 -color

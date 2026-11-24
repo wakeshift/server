@@ -508,7 +508,7 @@ class ToolCall:
         #: The tool being called.
         self.tool = tool
         #: The client subscribes to the app's events itself (MCP Events:
-        #: ChatGPT, an app's house agents): subscribe then makes no
+        #: ChatGPT, an app's own first-party agents): subscribe then makes no
         #: conversation subscription, and the block tells it what to subscribe to.
         self.native = native
         #: A native client's conversation, when it names one (ChatGPT's

@@ -39,6 +39,10 @@ function describe(e: OrgLogEntry): string {
       return d.expired ? `Replaced ${d.email}'s expired invite` : `Revoked ${d.email}'s invite`
     case 'org.invite_accepted':
       return `Accepted the invite for ${d.email}`
+    case 'org.app_key_from_link':
+      return d.new_app
+        ? `Created ${d.app_id} with key ${d.key_id} from a CLI link`
+        : `Added key ${d.key_id} to ${d.app_id} from a CLI link`
     default:
       return e.action
   }

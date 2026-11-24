@@ -4,8 +4,9 @@
 // The core offers it at WB_OPENCLAW_PLUGIN's version (else Wakeshift's
 // installer, openclaw.sh). WB_OPENCLAW_NPM_REGISTRY (else WB_NPM_REGISTRY,
 // as the container reaches it) points the container's npm at another
-// registry: a local one holding plugins/pack-npm.mjs's package, to bench
-// it before it's published.
+// registry: a local one holding the package as plugins/pack-npm.mjs (in
+// github.com/wakeshift/connectors) packs it, to bench it before it's
+// published.
 
 import { execFile, execFileSync } from "node:child_process";
 import { existsSync, readFileSync, writeFileSync } from "node:fs";

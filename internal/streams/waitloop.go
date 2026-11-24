@@ -6,8 +6,6 @@ package streams
 //
 //	chmod 700 "$HOME/.wakeshift/links"; while curl -sN --fail-with-body "$(cat "$HOME/.wakeshift/links/<name>")&loop=$$"; do :; done
 //
-// (docs/harnesses.md, "The wait's loop mode").
-//
 // The server keeps what today's loop keeps in shell variables (wait.go):
 //
 //   - The next round confirms the last. A round's batch is confirmed by the
@@ -300,7 +298,7 @@ func (s *Server) serveLoop(w http.ResponseWriter, r *http.Request) {
 	var holder string
 	wl := &waitLoop{id: id}
 	batch, err := s.longPoll(ctx, PollRequest{Tenant: c.Tenant, Agent: l.Agent, Target: l.Target, Valid: valid, Wait: timeout, Connector: l.Connector},
-		pollOpts{wait: true, holder: &holder, untilHooks: untilHooks, untilWait: untilWait, loop: wl, taken: start,
+		pollOpts{wait: true, holder: &holder, untilHooks: untilHooks, untilWait: untilWait, loop: wl, taken: start, app: linkApp(l),
 			keepalive: func() error { start(); return t.ping(ctx) }})
 	s.admittedAs(refusalKey(c), err)
 	// The link is in use: it slides, so the next round still finds it

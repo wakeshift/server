@@ -80,8 +80,8 @@ func TestAgentID(t *testing.T) {
 	}
 }
 
-// Each harness is found by the clientInfo name it really sends (verified
-// against the binaries), and only by that.
+// Each harness is found by the clientInfo name it really sends (as
+// observed), and only by that.
 // A stateless server sees the name a client registered with; with a tag in
 // parentheses, or the harness's own name, it's still that harness exactly.
 func TestExactClient(t *testing.T) {
@@ -128,11 +128,11 @@ func TestForClient(t *testing.T) {
 		"goose-cli":             "goose",
 		"Visual Studio Code":    "vscode",
 		"openai-mcp":            "chatgpt",       // from OpenAI's developer forum, not captured
-		"capy":                  "capy",          // captured from Capy's backend, November 5, 2026
-		"muse-custom-connector": "muse",          // captured from Meta's servers, November 5, 2026
+		"capy":                  "capy",          // observed from Capy's backend
+		"muse-custom-connector": "muse",          // observed from Meta's servers
 		"claude-ai":             "claude-cowork", // Claude's apps' connectors: Cowork's, and claude.ai chat's (Shared)
 		"Claude-AI":             "claude-cowork",
-		// A local MCP server in a Cowork plugin (the spike's probe, November 7, 2026).
+		// A local MCP server in a Cowork plugin (observed).
 		"local-agent-mode-plugin:wakeshift-cowork-probe:wakeshift-probe": "claude-cowork",
 		"LOCAL-AGENT-MODE-PLUGIN:p:s":                                    "claude-cowork",
 	} {
@@ -684,7 +684,7 @@ func TestConversationAndCall(t *testing.T) {
 
 // Recognize: a stated client name wins; without one, a _meta key only one
 // harness sends; without that, a User-Agent product token only one sends
-// (the User-Agents captured from the real binaries).
+// (the User-Agents as observed from each harness).
 func TestRecognize(t *testing.T) {
 	codex := map[string]any{"x-codex-turn-metadata": map[string]any{"thread_id": "t1"}}
 	claude := map[string]any{"claudecode/toolUseId": "toolu_1"}
@@ -706,11 +706,11 @@ func TestRecognize(t *testing.T) {
 		{"", map[string]any{"wakeshift/conversation": "1b47"}, "", "copilot", ByMeta},
 		{"my-client", claude, "", "claude-code", ByMeta}, // a client name that names no harness
 		{"", claude, "opencode/1.18.7", "claude-code", ByMeta},
-		// User-Agents as the binaries send them.
+		// User-Agents as the harnesses send them.
 		{"", nil, "claude-code/2.1.280 (sdk-cli)", "claude-code", ByUserAgent},
 		{"", nil, "codex-mcp-client/0.163.0", "codex", ByUserAgent},
 		// ChatGPT's Work chats call tools and events/* through Codex
-		// (the voucher probe, November 5, 2026): the product is still
+		// (observed): the product is still
 		// openai-mcp, and the comment names Codex. It's ChatGPT, not Codex.
 		{"", nil, "openai-mcp/1.0.0 (Codex)", "chatgpt", ByUserAgent},
 		{"", nil, "openai-mcp/1.0.0", "chatgpt", ByUserAgent},
@@ -724,8 +724,7 @@ func TestRecognize(t *testing.T) {
 		{"openai-mcp", nil, "openai-mcp/1.0.0", "chatgpt", ByClient},
 		{"", map[string]any{"openai/session": "v1/abc"}, "", "chatgpt", ByMeta},
 		{"", nil, "openai-mcp/1.0.0", "chatgpt", ByUserAgent},
-		// ChatGPT's desktop app (Codex mode), as a probe server captured it
-		// (November 9-10, 2026): its client name with its capabilities (both
+		// ChatGPT's desktop app (Codex mode), as observed: its client name with its capabilities (both
 		// the skybridge mime type and openai/form). A variant of ChatGPT,
 		// never Codex.
 		{"openai-mcp (Codex)", withCaps(map[string]any{"openai/session": "v1/abc", "sessionId": "6f1d"}, desktopCaps), "openai-mcp/1.0.0 (Codex)", "chatgpt-codex", ByClient},
@@ -748,11 +747,11 @@ func TestRecognize(t *testing.T) {
 		{"openai-mcp (Codex)", map[string]any{"io.modelcontextprotocol/clientCapabilities": map[string]any{"extensions": []any{1}}}, "", "chatgpt", ByClient},
 		{"openai-mcp (Codex)", map[string]any{"io.modelcontextprotocol/clientCapabilities": map[string]any{"extensions": map[string]any{
 			"openai/form": map[string]any{}, "io.modelcontextprotocol/ui": map[string]any{"mimeTypes": "text/html+skybridge"}}}}, "", "chatgpt", ByClient},
-		// Capy's backend, as a probe server captured it (November 5, 2026).
+		// Capy's backend, as observed.
 		{"capy", nil, "capy", "capy", ByClient},
 		{"", nil, "capy", "capy", ByUserAgent},
 		{"", map[string]any{}, "capybara/1", "", ""},
-		// Muse's connector (November 5, 2026): its client name alone. Its
+		// Muse's connector, as observed: its client name alone. Its
 		// User-Agent is Python's default, and other "muse-…" clients aren't
 		// it.
 		{"muse-custom-connector", nil, "Python-urllib/3.12", "muse", ByClient},
@@ -807,7 +806,7 @@ func TestRecognize(t *testing.T) {
 	}
 }
 
-// Asked once per conversation (vendor bench, November 6, 2026): what a
+// Asked once per conversation: what a
 // later subscribing call gets while nothing wakes the conversation is one
 // short note that points back to the earlier ask: no install command, no
 // question, and it says not to ask again after a no.
@@ -862,7 +861,7 @@ func TestForegroundLoop(t *testing.T) {
 }
 
 // The capabilities ChatGPT's desktop app and a Work chat on the web sent
-// on tools/call (the probes of November 9-10, 2026), as JSON.
+// on tools/call (observed), as JSON.
 const (
 	desktopCapsJSON = `{"experimental":{"openai/visibility":{"enabled":true}},"elicitation":{"form":{},"url":{}},"extensions":{"io.modelcontextprotocol/ui":{"mimeTypes":["text/html;profile=mcp-app","text/html+skybridge"]},"openai/elicitation":{"form":{},"userVerification":{}},"openai/form":{}}}`
 	webCapsJSON     = `{"experimental":{"openai/visibility":{"enabled":true}},"extensions":{"io.modelcontextprotocol/ui":{"mimeTypes":["text/html;profile=mcp-app"]},"openai/elicitation":{"userVerification":{}}}}`
@@ -907,8 +906,7 @@ func TestChatGPTDesktop(t *testing.T) {
 	if ChatGPTDesktop("openai-mcp", withCaps(nil, desktopCaps)) || ChatGPTDesktop("codex-mcp-client", withCaps(nil, desktopCaps)) {
 		t.Fatal("another client name")
 	}
-	// The desktop app's regular chat (the probe of November 10, 2026,
-	// 07:09:57): ChatGPT, not native; the web's chats aren't it.
+	// The desktop app's regular chat (observed): ChatGPT, not native; the web's chats aren't it.
 	regular := withCaps(map[string]any{"openai/userAgent": "Codex Desktop/26.1103.60933 (Mac OS; arm64)", "openai/session": "v1/abc", "openai/locale": "en-US", "timezone": "UTC", "timezone_offset_minutes": 0},
 		mustJSON(`{"experimental":{"openai/visibility":{"enabled":true}},"extensions":{"io.modelcontextprotocol/ui":{"mimeTypes":["text/html;profile=mcp-app"]}}}`))
 	if !ChatGPTDesktopChat("openai-mcp", regular) || !ChatGPTNotNative("openai-mcp", regular) || ChatGPTDesktop("openai-mcp", regular) {

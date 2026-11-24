@@ -41,9 +41,11 @@ import (
 
 // Home is Wakeshift's own directory on this machine (WAKESHIFT_HOME,
 // default ~/.wakeshift): the binary in bin/, each harness's settings, keys,
-// links and logs in <harness>/.
+// links and logs in <harness>/. A relative WAKESHIFT_HOME is ignored: a
+// project's settings can set a hook's environment, and a relative home
+// would be the project's own directory, its issuers the project's.
 func Home() string {
-	if h := os.Getenv("WAKESHIFT_HOME"); h != "" {
+	if h := os.Getenv("WAKESHIFT_HOME"); h != "" && filepath.IsAbs(h) {
 		return h
 	}
 	home, _ := os.UserHomeDir()

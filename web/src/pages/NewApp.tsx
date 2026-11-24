@@ -5,7 +5,7 @@ import { appPath } from '../components/Layout'
 import { Button, ButtonLink, Card, ErrorText, Hint, Input, Loading, PageHeader, Secret, Select } from '../components/ui'
 import { chooseOrg, useCurrentOrg } from '../hooks/useOrg'
 import { KeySDKNote } from '../components/KeySDKNote'
-import { confirmError, Done, invalidLink, KeyCode, useCLILink, useKeyCode } from '../components/CLIConfirm'
+import { codeMatches, confirmError, Done, invalidLink, TypeKeyCode, useCLILink, useKeyCode } from '../components/CLIConfirm'
 import { forgetLink, type CLILink } from '../lib/cliLink'
 
 // /new-app is the form below, or, opened from @wakeshift/cli's link
@@ -85,8 +85,8 @@ function RegisterApp() {
 
 // ConfirmNewApp creates the app the CLI proposed, with the key it made on
 // the developer's machine as its only key: the ID and name (editable), the
-// organization (a choice if they're in several), and the key code to
-// compare with the terminal. Nothing is sent until they press Create app.
+// organization (a choice if they're in several), and the key code, typed
+// from the terminal. Nothing is sent until they press Create app.
 function ConfirmNewApp({ link }: { link: CLILink }) {
   const qc = useQueryClient()
   const { orgs, current } = useCurrentOrg()
@@ -95,9 +95,10 @@ function ConfirmNewApp({ link }: { link: CLILink }) {
   const [id, setID] = useState(link.id)
   const [name, setName] = useState(link.name || link.id)
   const key = useKeyCode(link.pk)
+  const [typed, setTyped] = useState('')
   const [made, setMade] = useState<OwnedApp | null>(null)
   const create = useMutation({
-    mutationFn: () => registerApp({ org_id: org?.id, id, name, public_key: link.pk }),
+    mutationFn: () => registerApp({ org_id: org?.id, id, name, public_key: link.pk, key_code: typed.trim() }),
     onSuccess: (m) => {
       forgetLink()
       if (org) chooseOrg(org.id)
@@ -123,7 +124,7 @@ function ConfirmNewApp({ link }: { link: CLILink }) {
   return (
     <div className="space-y-7">
       <PageHeader context="New app" title="Create your app">
-        Your terminal made a key for a new app. Check the key code, then create the app with that key.
+        Your terminal made a key for a new app. Type the key code it shows, then create the app with that key.
       </PageHeader>
       <Card>
         {key.invalid ? (
@@ -136,7 +137,7 @@ function ConfirmNewApp({ link }: { link: CLILink }) {
               create.mutate()
             }}
           >
-            <KeyCode code={key.code} />
+            <TypeKeyCode value={typed} onChange={setTyped} code={key.code} />
             {orgs.isPending && <Loading />}
             {orgs.data && orgs.data.length > 1 && (
               <Select label="Organization" value={org?.id ?? ''} onChange={(e) => setOrgID(e.target.value)}>
@@ -152,7 +153,7 @@ function ConfirmNewApp({ link }: { link: CLILink }) {
             <Input label="Name" value={name} onChange={(e) => setName(e.target.value)} />
             <Hint>What your app's users see. You can change it later in Settings.</Hint>
             <div>
-              <Button type="submit" disabled={!org || !id || !name || !key.code || create.isPending}>
+              <Button type="submit" disabled={!org || !id || !name || !codeMatches(typed, key.code) || create.isPending}>
                 Create app
               </Button>
             </div>

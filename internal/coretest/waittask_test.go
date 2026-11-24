@@ -18,10 +18,12 @@ import (
 
 	"github.com/jackc/pgx/v5"
 
+	"github.com/wakeshift/server/internal/appapi"
 	"github.com/wakeshift/server/internal/core"
 	"github.com/wakeshift/server/internal/coretest"
 	"github.com/wakeshift/server/internal/harnesses"
 	"github.com/wakeshift/server/internal/jws"
+	"github.com/wakeshift/server/internal/waittask"
 	"github.com/wakeshift/server/pkg/wakeshift"
 )
 
@@ -559,5 +561,45 @@ func TestWaitTaskForAnAppActingForItsAgents(t *testing.T) {
 	})
 	if !strings.Contains(got.text(), "hello from #general") || !strings.Contains(got.text(), "session_key=\""+sub.Session+"\"") {
 		t.Fatalf("result: %s", got.text())
+	}
+}
+
+// A userless conversation's task ID is the only thing that says the caller
+// is the conversation (tasks/get carries no session key), so it works for
+// appapi.ConversationTaskMaxAge, then fails as an expired task does; a
+// user's task, which only that user's calls follow, works for
+// waittask.MaxAge.
+func TestWaitTaskInAConversationWorkspaceExpiresSooner(t *testing.T) {
+	c := coretest.Start(t)
+	app := noteApp(t, c, "ci")
+	codec, err := waittask.New(coretest.Key("wait-tasks"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The same conversation's task, as if made age ago (another ID, so it
+	// reads as one the newest replaced: answered, not refused as too old).
+	aged := func(id string, age time.Duration) string {
+		t.Helper()
+		task, err := codec.Open("ci", id, time.Now())
+		if err != nil {
+			t.Fatal(err)
+		}
+		task.Issued = time.Now().Add(-age)
+		old, err := codec.Mint("ci", task)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return old
+	}
+	lone, _, loneTask := subscribedTask(t, app, taskCaller(""), "ci/y")
+	if got := taskGet(t, app, lone, aged(loneTask.id(), appapi.ConversationTaskMaxAge-time.Hour), 0); got.status() == "failed" || got.RPCError != nil {
+		t.Fatalf("a userless conversation's task within the day: %+v", got)
+	}
+	if got := taskGet(t, app, lone, aged(loneTask.id(), appapi.ConversationTaskMaxAge+time.Hour), 0); got.status() != "failed" || !strings.Contains(got.message(), "too old") {
+		t.Fatalf("a userless conversation's task past the day: %+v", got)
+	}
+	ada, _, adaTask := subscribedTask(t, app, taskCaller("ada"), "ci/x")
+	if got := taskGet(t, app, ada, aged(adaTask.id(), appapi.ConversationTaskMaxAge+time.Hour), 0); got.status() == "failed" || got.RPCError != nil {
+		t.Fatalf("a user's task past the day: %+v", got)
 	}
 }

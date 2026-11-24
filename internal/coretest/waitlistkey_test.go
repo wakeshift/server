@@ -26,6 +26,12 @@ func cliKey(t *testing.T) (key, pk string) {
 	return appkey.Format(seed), base64.RawURLEncoding.EncodeToString(pub)
 }
 
+// keyCode is pk's key code, as the CLI prints it and the person types it.
+func keyCode(pk string) string {
+	pub, _ := base64.RawURLEncoding.DecodeString(pk)
+	return appkey.KeyID(pub)[:8]
+}
+
 // Past the sign-up cap, the person who opens init's link lands on the
 // waitlist, and the page holds the link's public key: init's poll (GET
 // /app with that key) gets 403 waitlisted at once, rather than 401 for ten
@@ -64,7 +70,7 @@ func TestWaitlistedInit(t *testing.T) {
 	if code := person.Do("POST", "/api/v1/waitlist/key", map[string]string{"public_key": pk}, nil); code != 200 {
 		t.Fatalf("hold the key: %d", code)
 	}
-	if code := person.Do("POST", "/api/v1/developer/apps/register", map[string]string{"id": "shop-dev", "name": "Shop", "public_key": pk}, nil); code != 401 {
+	if code := person.Do("POST", "/api/v1/developer/apps/register", map[string]string{"id": "shop-dev", "name": "Shop", "public_key": pk, "key_code": keyCode(pk)}, nil); code != 401 {
 		t.Fatalf("register while waitlisted: %d", code)
 	}
 
@@ -97,7 +103,7 @@ func TestWaitlistedInit(t *testing.T) {
 		t.Fatalf("invited: %v", err)
 	}
 	ada, _ := c.GoogleSignIn(g, "sub-ada", "ada@example.com")
-	if code := ada.Do("POST", "/api/v1/developer/apps/register", map[string]string{"id": "shop-dev", "name": "Shop", "public_key": pk}, nil); code != 200 {
+	if code := ada.Do("POST", "/api/v1/developer/apps/register", map[string]string{"id": "shop-dev", "name": "Shop", "public_key": pk, "key_code": keyCode(pk)}, nil); code != 200 {
 		t.Fatalf("register once admitted: %d", code)
 	}
 	info, err := coretest.KeyClient(t, key, c.URL).Info(t.Context())

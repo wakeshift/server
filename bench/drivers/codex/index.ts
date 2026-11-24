@@ -435,8 +435,7 @@ export class Codex extends TmuxDriver implements Driver {
    * Waits up to ms for Codex's hooks review prompt and trusts the hooks
    * there; null if it never showed. The prompt can follow the composer by
    * a few seconds, so a message typed meanwhile would land in it and leave
-   * the hooks untrusted (the elicitation prototype's sixth run, November
-   * 2026). The picker sometimes takes the Enter as "1. Review hooks" and
+   * the hooks untrusted. The picker sometimes takes the Enter as "1. Review hooks" and
    * opens the hooks table ("t trust all · … · esc close"): trusted there,
    * and closed.
    */

@@ -163,9 +163,10 @@ type Harness struct {
 	// CallLimit, if set, is how long it lets a remote MCP server take over
 	// one tool call by default before it gives up on the call: the SDKs'
 	// call.callLimit, which tools compare with a long explicit wait they're
-	// asked for (docs/harnesses.md, "Per-call limits"). Zero: not known.
+	// asked for. Zero: not known.
 	// The user's own setting can raise it, which the server can't see, so
-	// it's the default, verified from the harness's source.
+	// it's the default, from the harness's source where it's open, else
+	// observed.
 	CallLimit time.Duration
 	// ZeroInstall, if set, is how it's woken with nothing installed (Claude
 	// Code: Monitor); installing is then an upgrade.
@@ -387,7 +388,7 @@ var all = []Harness{
 		ID: "codex", Name: "Codex", Claim: "codex", Aliases: []string{"codex-cli", "openai-codex"}, Clients: []string{"codex-mcp-client"}, UserAgents: []string{"codex-mcp-client"},
 		Wake: Connector, Ack: "at least once, acknowledged when the turn starts", Binding: ByConversation, Carrier: Meta,
 		ConversationMeta: "x-codex-turn-metadata.thread_id", Fingerprint: "x-codex-turn-metadata.thread_id", Installable: true,
-		// QA pass, November 9, 2026: Codex's agent told the user "The
+		// In testing, without it Codex's agent told the user "The
 		// Webhooks tool requires this one-time setup".
 		Credit: true,
 		// Codex 0.164 and later ask to trust a plugin's hooks again whenever
@@ -406,8 +407,8 @@ var all = []Harness{
 		Run:     "It needs network access and writes ~/.wakeshift/bin and ~/.codex/hooks.json, which the sandbox blocks: run it with escalated permissions, so the user approves it. If the sandbox blocks it anyway, ask to run it outside the sandbox rather than only printing the command: the user approves that, as for any escalated command.",
 		Trust:   "Quit Codex (/quit), start it again in this conversation with `codex resume --last`, and trust the Wakeshift hooks when Codex asks (\"Trust all and continue\").",
 		// Codex runs its SessionStart hook when the resumed thread's first turn
-		// starts, not when the window opens (wakebench S8, October 28: the
-		// connector re-armed only at the next prompt), so a restart needs one.
+		// starts, not when the window opens (in testing, the connector
+		// re-armed only at the next prompt), so a restart needs one.
 		Restart:     "After a later restart, send any message in this thread once it's open again, so it reconnects.",
 		AfterUpdate: "Codex keeps trusting the hooks it trusted, since their command stays the same; if Codex asks the next time it starts (an update can add one, or a hook stops running), choose \"Trust all and continue\".",
 		When:        "as soon as they arrive, or once its turn ends if it's busy, while the thread is open in Codex",
@@ -431,8 +432,8 @@ var all = []Harness{
 		// Wakeshift's plugin (plugins/agent-plugins). It has no options:
 		// its launcher trusts the Wakeshift its marketplace ref was
 		// rendered for, so it works installed as another plugin's
-		// dependency, which sets none, and the install passes none. (Until
-		// November 8, 2026 it passed `--config issuer=<origin>`, for a
+		// dependency, which sets none, and the install passes none. (Earlier
+		// installs passed `--config issuer=<origin>`, for a
 		// stale marketplace clone holding the plugin from before that
 		// option went; on the current plugin it only warned "declares no
 		// userConfig options", which agents read as a failed setting. Such a
@@ -489,12 +490,11 @@ var all = []Harness{
 		// own chats) send too, so the name is Shared and its notes say what
 		// to do with a Monitor tool and what without one (Unsure); a local
 		// MCP server in a Cowork plugin sees
-		// "local-agent-mode-plugin:<plugin>:<server>" (ClientPrefix; the
-		// spike's probe, November 7, 2026). The model has named itself
-		// "claude-ai" and "Claude app (claude.ai)" in the harness argument
-		// (Aliases). Cowork runs Claude Code, with its Monitor tool, and
-		// Monitor output wakes an idle task (November 7, 2026: a 3-tick
-		// command woke it three times); plugin hooks don't run in a task,
+		// "local-agent-mode-plugin:<plugin>:<server>" (ClientPrefix). The
+		// model has named itself "claude-ai" and "Claude app (claude.ai)"
+		// in the harness argument (Aliases). Cowork runs Claude Code, with
+		// its Monitor tool, and Monitor output wakes an idle task (observed:
+		// each line a command printed woke it); plugin hooks don't run in a task,
 		// and its MCP client takes no tasks, so the Monitor is the only wake
 		// path. Its shell runs in a VM behind the workspace's network
 		// allowlist (Settings > Capabilities > Allowed websites), which may block the core's
@@ -535,12 +535,14 @@ var all = []Harness{
 		Blocker: "nothing can start a Cursor cloud agent's next turn yet (that needs a bridge to Cursor's cloud)",
 	},
 	{
-		// Grok Bot's MCP traffic is Cursor's: clientInfo Cursor 1.0.0,
-		// User-Agent Cursor/1.0.0, from AWS us-east-1, no _meta beyond
-		// progressToken (checked 2026-10-19). Only its agent can tell.
+		// Grok Bot runs in Cursor's cloud, so its MCP traffic is Cursor's:
+		// clientInfo Cursor 1.0.0, User-Agent Cursor/1.0.0, no _meta beyond
+		// progressToken. Only its agent can tell. Its webhook wake is a
+		// Cursor Automations routine in the bot (internal/agenthooks,
+		// cursor.go).
 		ID: "grok-bot", Name: "Grok Bot", Claim: "grok-bot", Aliases: []string{"grok", "grokbot"}, Family: "cursor",
 		Wake: Foreground, ConversationEnv: "CURSOR_CONVERSATION_ID",
-		Blocker: "a command in the background can't wake Grok Bot, so it waits in the foreground (webhook delivery comes later)",
+		Blocker: "a command in the background can't wake Grok Bot, so it waits in the foreground until the bot's Automations webhook is set up",
 	},
 	{
 		ID: "copilot", Name: "GitHub Copilot CLI", Claim: "copilot-cli", Aliases: []string{"copilot", "github-copilot"}, Clients: []string{"copilot-cli"}, UserAgents: []string{"copilot-cli"},
@@ -586,8 +588,8 @@ var all = []Harness{
 		// pi (earendil-works/pi, the terminal coding agent) calls MCP
 		// servers with clientInfo "pi" and its version, protocol
 		// 2025-11-25, User-Agent "undici" (Node's default: no rule) and
-		// tools/call _meta of progressToken only (1.5.0, checked against a
-		// probe server). Exact: "pi-…" client names may be other products.
+		// tools/call _meta of progressToken only (observed on 1.5.0).
+		// Exact: "pi-…" client names may be other products.
 		// Its MCP client drops a result's _meta before extensions see it,
 		// so the beacon is the result's last line, which Wakeshift's
 		// extension takes out; the extension sets conversation_id to the
@@ -673,7 +675,7 @@ var all = []Harness{
 		Uninstall:      "openclaw wakeshift reset && openclaw plugins uninstall wakeshift --force",
 		// One question, not two: a gateway in Docker usually listens beyond
 		// this computer, and the installer would otherwise stop to ask about
-		// it (wakebench, October 26, 2026: without this, agents asked twice).
+		// it (in testing, without this, agents asked twice).
 		AskAlso:  "if the OpenClaw gateway listens beyond this computer (in Docker it usually does), OpenClaw's hooks endpoint shares that listener, so it's reachable there too, guarded by the plugin's token; a firewall or proxy rule that blocks /hooks/ from other machines keeps it local.",
 		AgreeEnv: "WAKESHIFT_OPENCLAW_NETWORK_HOOKS=1",
 		Agree:    "openclaw config set plugins.entries.wakeshift.config.allowNetworkHooks true --strict-json",
@@ -708,12 +710,11 @@ var all = []Harness{
 		ID: "hermes", Name: "Hermes Agent", Claim: "hermes", Aliases: []string{"hermes-agent"},
 		Clients: []string{"hermes-agent", "mcp"}, Shared: []string{"mcp"}, Unsure: "you're Hermes Agent (Nous Research)",
 		// A stateless server on a protocol before 2026-07-28 (the
-		// quickstart's createMcpHandler, Shipyard in wakebench's realistic
-		// tier) never sees Hermes's client name, and before its plugin is
-		// installed nothing else in the call names it unless the model
-		// passes harness itself: in wakebench (November 7, 2026), most
-		// conversations got "Wakeshift can't wake this agent" and never
-		// heard of the install. The User-Agent is the MCP Python SDK 2.x's
+		// quickstart's createMcpHandler, for one) never sees Hermes's
+		// client name, and before its plugin is installed nothing else in
+		// the call names it unless the model passes harness itself: in
+		// testing, without this, conversations got "Wakeshift can't wake
+		// this agent" and never heard of the install. The User-Agent is the MCP Python SDK 2.x's
 		// (other Python clients send it too), so it's Unsure.
 		SharedUserAgents: []string{"python-httpx2"},
 		Wake:             Plugin, Ack: "at least once, acknowledged once Hermes accepts the run",
@@ -722,8 +723,8 @@ var all = []Harness{
 		Changes: "installs Wakeshift's plugin from its public repository, github.com/wakeshift/hermes-plugin, with Hermes's own plugin installer, into $HERMES_HOME/plugins/wakeshift, enables it, and lets it start turns in your Hermes chats (Hermes's allow_gateway_injection setting for it, without which the plugin wakes no Hermes chat, through the API server, `hermes chat` or a Telegram or Discord direct message); it starts them only in conversations connected to Wakeshift",
 		Allow:   "hermes config set plugins.entries.wakeshift.allow_gateway_injection true",
 		// The command a user types is `hermes …`; only the agent's own run
-		// may need another form (wakebench, November 2, 2026: the bare
-		// command failed with exit 127 in the image's terminal tool, and the
+		// may need another form (in testing, the bare command failed with
+		// exit 127 in the Docker image's terminal tool, and the
 		// agent then gave the user its fallback to type).
 		Run: "It runs where Hermes runs (inside its container, if it's in one). In your question, quote the command as it is, starting with `hermes`: that's what the user types where Hermes runs (in Docker, after `docker exec -u hermes <container>`). " +
 			"To run it yourself, first check `command -v hermes`: if your terminal doesn't have it (Hermes's Docker image doesn't put it on the PATH), run each `hermes` in the command as `\"$HERMES_PYTHON\" -m hermes_cli.main` instead (Hermes sets HERMES_PYTHON for its tools). Whatever you ran, every command you give the user starts with `hermes`, so `hermes chat --continue` rather than that form. " +
@@ -754,8 +755,8 @@ var all = []Harness{
 	},
 	{
 		// ChatGPT's desktop app (its cloud Codex mode), which can't
-		// subscribe with MCP Events (the web can). Probes on November 9-10,
-		// 2026 saw clientInfo "openai-mcp (Codex)" 1.0.0 (in each call's
+		// subscribe with MCP Events (the web can). Observed: clientInfo
+		// "openai-mcp (Codex)" 1.0.0 (in each call's
 		// _meta, protocol 2026-07-28), User-Agent "openai-mcp/1.0.0
 		// (Codex)", _meta sessionId, windowId, itemId and callId (exec-…);
 		// no MCP tasks, no open stream, tool calls cut off at about 120s.
@@ -786,10 +787,9 @@ var all = []Harness{
 		// capabilities {} (no tasks, elicitation, events or roots), first a
 		// server/discover on 2026-07-28 with no session, then an initialize
 		// on 2025-06-18; tools/call carries no _meta and no thread ID (only
-		// traceparent and b3 headers). Checked with a probe server on
-		// November 5, 2026. Each thread runs on its own VM, which sleeps
-		// about 2 minutes after the thread goes idle (killing any listener),
-		// and keeping it awake costs the user and lasts 6 hours at most. But
+		// traceparent and b3 headers), as observed. Each thread runs on its
+		// own VM, which sleeps soon after the thread goes idle (killing any
+		// listener), so nothing can hold a stream open for it. But
 		// an agent can create a watch on its own thread (capy.subscribe with
 		// an incoming_webhook source, until at most 30 days out) whose URL
 		// wakes the thread on each POST, even idle, with no process or awake
@@ -806,17 +806,15 @@ var all = []Harness{
 	},
 	{
 		// Muse, Meta's agent (meta.ai). Its MCP connector, run from Meta's
-		// servers (egress 2606:54c1:…), sends clientInfo
+		// servers, sends clientInfo
 		// "muse-custom-connector" 1 on protocol 2025-03-26 with
 		// capabilities {} and User-Agent Python-urllib/3.12 (generic: no
 		// rule), and a new initialize before every tool call; tools/call
 		// carries no _meta and no thread ID. Remote MCP with OAuth and
-		// dynamic client registration. Checked with a probe server on
-		// November 5, 2026. It can't hold a stream open, but it runs
-		// background tasks on its sandbox VM, and a finished task's output
-		// starts a new turn in the conversation (seconds from a publish to
-		// the turn; an earlier session was woken every time by a one-shot
-		// wait). So it's woken by a one-shot command (MuseLoop):
+		// dynamic client registration, as observed. It can't hold a stream
+		// open, but it runs background tasks on its sandbox VM, and a
+		// finished task's output starts a new turn in the conversation.
+		// So it's woken by a one-shot command (MuseLoop):
 		// it waits, prints what arrived, confirms it and finishes. Nothing
 		// to install. Exact: only that client name, not "muse-…".
 		ID: "muse", Name: "Muse", Clients: []string{"muse-custom-connector"}, Exact: true,
@@ -830,7 +828,8 @@ var all = []Harness{
 		Blocker: "Google replaced Gemini CLI with Antigravity CLI (agy), which Wakeshift can wake",
 	},
 
-	// Researched from docs and source only.
+	// Not verified against the harnesses themselves: from their public
+	// docs (and their source, where that's open).
 	{
 		ID: "goose", Name: "Goose", Clients: []string{"goose-cli", "goose-desktop"},
 		Wake: StopHook, Binding: ByConversation, ConversationMeta: "agent-session-id",
@@ -893,7 +892,7 @@ func ForClient(name string) (Harness, bool) {
 // client names, its name or its ID, ignoring case and a trailing tag in
 // parentheses. A stateless server sees only the name a client registered
 // with, which isn't always its clientInfo name and often carries a tag
-// ("OpenCode", "opencode (wakebench)", "Claude Code (wakeshift)"). A
+// ("OpenCode", "opencode (dev)", "Claude Code (wakeshift)"). A
 // variant ("cursor-nightly") isn't exact: it may be another product.
 func ExactClient(name string) (Harness, bool) {
 	if h, ok := ForClient(name); ok {
@@ -1488,8 +1487,8 @@ func itThey(h Harness) string   { return pick(h, "it", "they") }
 // askShape is how the agent asks about an install and runs it: a real
 // yes/no question that quotes the exact command (the user sees what will
 // run before they agree), options in a neutral order, and on a yes the
-// command as given, with nothing looked up first (wakebench, November 2,
-// 2026: Codex's question left the command out, Copilot's only offered to
+// command as given, with nothing looked up first (in testing, without
+// this, Codex's question left the command out, Copilot's only offered to
 // give it, and Codex's agent read its docs skill and searched the web
 // before running it).
 func askShape(h Harness, install string) string {
@@ -1508,8 +1507,8 @@ func creditNote(h Harness) string {
 }
 
 // declined is what the agent tells the user after a no where nothing else
-// wakes the conversation (wakebench, November 2, 2026: opencode's agent
-// said it would "keep polling", which nothing does).
+// wakes the conversation (in testing, opencode's agent said it would
+// "keep polling", which nothing does).
 const declined = "If they say no, install nothing, and tell them you won't be notified here when something arrives, so they'll need to ask you to check."
 
 // installedAlready is the exception an install note ends with: the hooks
@@ -1540,10 +1539,9 @@ func CantWake(name string) string {
 // claude.ai's chats, Cowork, and Claude Code (in a terminal, or the Claude
 // desktop app's Code tab), whose claude.ai connectors go through Anthropic's
 // MCP proxy. A call that came that way isn't one Wakeshift's plugin for
-// Claude Code can connect: on November 9, 2026, a marked watch through the
-// proxy, from the desktop app's Code tab, reached its PostToolUse hook with
-// no beacon (the transcript's mcpMeta held only the server's serverInfo),
-// so the conversation was promised wakes and got none.
+// Claude Code can connect: a marked watch through the proxy, from the
+// desktop app's Code tab, was observed to reach the plugin's PostToolUse
+// hook with no beacon, so the conversation was promised wakes and got none.
 var ConnectorProxyClients = []string{"claude-ai"}
 
 // ViaConnectorProxy reports whether a call's MCP client name (initialize's
@@ -1594,8 +1592,8 @@ func askWith(h Harness, install string) string {
 
 // askWithNo is askWith with the "no" option's description given. The
 // question itself quotes the command too, and the options come yes first
-// with neither marked as recommended (wakebench, November 2, 2026: models
-// put "No" first and preselected it, or labelled it "(Recommended)").
+// with neither marked as recommended (in testing, models otherwise put
+// "No" first and preselected it, or labelled it "(Recommended)").
 func askWithNo(h Harness, install, no string) string {
 	n := "Ask them with your " + h.AskTool + " tool, quoting the exact command in the question itself, for example: \"Install " + Kit(h) + "? It runs `" + install + "`.\" " +
 		"Give two options, in this order, and mark neither as recommended: \"" + AskYes(h) + "\" (description: runs `" + install + "`, " + changes(h) + ") " +
@@ -1613,7 +1611,7 @@ func askWithNo(h Harness, install, no string) string {
 // starts that only after a no or an install that didn't happen. In manual
 // permission mode the Monitor's approval shows its whole wait loop with
 // Claude Code's "Quoted text in this command can't be checked" warning,
-// the longest approval in any flow (wakebench, November 2, 2026), so a
+// the longest approval in any flow, so a
 // user who says yes never sees it. Nothing is lost while the agent asks: new
 // messages are held for the conversation until the plugin connects it or
 // the fallback starts.
@@ -1666,15 +1664,14 @@ func pluginFirst(h Harness, app, install string, tasks bool, fallback string) st
 	}
 	w := waker(tasks)
 	// A fact first, then one question with every way to be notified, and
-	// nothing to run before the answer. In the realistic bench tier
-	// (wakebench R1-R5, November 2-3, 2026), Claude Code set aside a result
-	// that told it to start a background command against an external URL,
-	// or to offer "a third-party plugin" that "would edit your settings",
-	// as an unrequested or injected instruction, believing the app's own
-	// watch would tell it anyway ("Shipyard's own watch should notify me").
-	// Saying first that subscribing alone won't reach the conversation, and
-	// offering the listener, the plugin and nothing as the user's choice,
-	// took it from 0/10 to asking or listening in nearly every run.
+	// nothing to run before the answer. In testing, Claude Code set aside a
+	// result that told it to start a background command against an
+	// external URL, or to offer "a third-party plugin" that "would edit
+	// your settings", as an unrequested or injected instruction, believing
+	// the app's own watch would tell it anyway. Saying first that
+	// subscribing alone won't reach the conversation, and offering the
+	// listener, the plugin and nothing as the user's choice, made it ask
+	// or listen instead.
 	n := "Subscribed, but that alone won't tell you when something arrives: " + app + " delivers its notifications through Wakeshift, " + svc + ", and they reach this conversation only once the user picks how. " +
 		"The user asked to hear about it, so ask them now; nothing runs until they answer, and new messages are held for this conversation until then, so none are lost. " +
 		"Ask them one question with your " + h.AskTool + " tool, \"How should I notify you here when it arrives, even while I'm idle?\", with three options, in this order, none marked as recommended: " +
@@ -1694,15 +1691,14 @@ func pluginFirst(h Harness, app, install string, tasks bool, fallback string) st
 	return n + " If they pick \"" + AskSession + "\", or the plugin doesn't install (it fails, or it's refused and they don't run it themselves), use " + w + ": " + fallback
 }
 
-// Session-only steps, sent when they're picked (docs/harnesses.md). In
-// install-offer experiments with Claude Code in auto mode (November 12,
-// 2026), the offer with every step inline (8.8 KB: the question, the
+// Session-only steps, sent when they're picked. In testing with Claude
+// Code in auto mode, the offer with every step inline (the question, the
 // plugin, and for "this session" a private link to write to a file and a
-// 2 KB command) was often set aside by the agent itself, naming the link,
+// long command) was often set aside by the agent itself, naming the link,
 // the file or the listener as the risk. A short, neutral question with the
 // plugin's path, and for "this session" one curl of a one-time URL that
-// prints its steps, was asked every time, and once the user had picked
-// "this session", the agent fetched and followed the steps every time.
+// prints its steps, was asked reliably, and once the user had picked
+// "this session", the agent fetched and followed the steps.
 
 // PluginFirstDeferredNote is PluginFirstNote with the session-only steps
 // deferred: the question, the plugin's path, and for AskSession one
@@ -1777,8 +1773,8 @@ func selfConnects(h Harness) string {
 }
 
 // firstWake is what the first wake after the install tells the agent: a
-// note for it, not the words the user sees (QA pass, November 9, 2026: the
-// agent told the user their first notification "will start with
+// note for it, not the words the user sees (in testing, the agent told
+// the user their first notification "will start with
 // 'Wakeshift: connected'", while Claude Code showed them "Woken by
 // Wakeshift").
 func firstWake(h Harness) string {
@@ -1788,8 +1784,8 @@ func firstWake(h Harness) string {
 // PluginConnectingNote is what such a conversation is told on a result
 // while the result of its call just before is still connecting the plugin
 // (its hooks haven't redeemed that result's beacon yet; they do within
-// seconds): don't fall back yet, call again in a moment (wakebench,
-// November 2, 2026: an agent that called twice at once got no "connected"
+// seconds): don't fall back yet, call again in a moment (in testing, an
+// agent that called twice at once got no "connected"
 // and started the Monitor, which in manual mode means its approval on the
 // happy path).
 func PluginConnectingNote(h Harness, base string, tasks bool) string {
@@ -1902,8 +1898,8 @@ func RepeatNote(h Harness, base string) string {
 
 // RepeatNoteFor is RepeatNote with the install command given. It reads
 // true whether or not this very result connects the conversation: the
-// "connected" note comes after the result (wakebench, November 2, 2026:
-// Codex's result said its hooks hadn't connected, right above the note
+// "connected" note comes after the result (in testing, Codex's result
+// said its hooks hadn't connected, right above the note
 // that they had).
 func RepeatNoteFor(h Harness, install string) string {
 	if !h.Installable {
@@ -1918,8 +1914,7 @@ func RepeatNoteFor(h Harness, install string) string {
 		" Don't ask again if they said no.")
 }
 
-// Asked once per conversation (vendor bench, November 6, 2026): a
-// conversation that polls the app's status tool, which subscribes too, got
+// Asked once per conversation: in testing, a conversation that polls the app's status tool, which subscribes too, got
 // the whole ask again on every call, and Claude Code read the copies as a
 // repeated injected request and set them aside. So the ask comes in full
 // once per conversation, and a later subscribing call that finds nothing

@@ -196,7 +196,7 @@ func Run(ctx context.Context, args []string, stdin io.Reader, stdout, stderr io.
 				fmt.Fprintln(stdout, "Next: "+t)
 			}
 			// An agent that ran this mid-conversation took "nothing to
-			// approve" as done and waited (wakebench S11): the hooks
+			// approve" as done and waited: the hooks
 			// connect a conversation only from a beacon in a result that
 			// comes after the install, so say it last, where it's read.
 			fmt.Fprintln(stdout, AfterInstall)
@@ -380,7 +380,8 @@ func Run(ctx context.Context, args []string, stdin io.Reader, stdout, stderr io.
 	case "codex-background":
 		// How a Codex desktop thread no window has open runs a wake:
 		// read-only (the default), workspace-write, or the thread's own
-		// sandbox. Nothing asks for approval either way.
+		// sandbox. Either way, a command that needs approval fails (nobody
+		// is there to give it), and the turn still completes.
 		dir := codexconnector.LoadSettings().Dir
 		if len(rest) == 0 {
 			fmt.Fprintln(stdout, codexconnector.BackgroundPermissions(dir))
@@ -399,12 +400,12 @@ func Run(ctx context.Context, args []string, stdin io.Reader, stdout, stderr io.
 }
 
 // grokCmd is `wakeshift grok init|prove --bot ID --issuer URL
-// [--challenge ID]` (connector.GrokInit, connector.GrokProve): a Grok Bot's
+// [--challenge ID [--app ID]]` (connector.GrokInit, connector.GrokProve): a Grok Bot's
 // key and proofs. It prints the outcome on stdout, never the key, and
 // exits with the connector.GrokExit* codes.
 func grokCmd(ctx context.Context, rest []string, stdout, stderr io.Writer, prog string) int {
 	if len(rest) < 1 || (rest[0] != "init" && rest[0] != "prove") {
-		fmt.Fprintf(stderr, "usage: %s grok init --bot ID --issuer URL | grok prove --bot ID --issuer URL [--challenge ID]\n", prog)
+		fmt.Fprintf(stderr, "usage: %s grok init --bot ID --issuer URL | grok prove --bot ID --issuer URL [--challenge ID [--app ID]]\n", prog)
 		return connector.GrokExitUsage
 	}
 	fs := flag.NewFlagSet("grok "+rest[0], flag.ContinueOnError)
@@ -412,15 +413,16 @@ func grokCmd(ctx context.Context, rest []string, stdout, stderr io.Writer, prog 
 	bot := fs.String("bot", "", "the bot's ID, as Wakeshift wrote it")
 	issuer := fs.String("issuer", "", "the Wakeshift, as Wakeshift wrote it")
 	challenge := fs.String("challenge", "", "prove: the register challenge's ID, as Wakeshift wrote it (none: the setup check a webhook's run answers)")
-	if fs.Parse(rest[1:]) != nil || fs.NArg() != 0 || *bot == "" || *issuer == "" || (rest[0] == "init" && *challenge != "") {
-		fmt.Fprintf(stderr, "usage: %s grok init --bot ID --issuer URL | grok prove --bot ID --issuer URL [--challenge ID]\n", prog)
+	app := fs.String("app", "", "prove: the app the register challenge must be for, as Wakeshift wrote it")
+	if fs.Parse(rest[1:]) != nil || fs.NArg() != 0 || *bot == "" || *issuer == "" || (rest[0] == "init" && (*challenge != "" || *app != "")) {
+		fmt.Fprintf(stderr, "usage: %s grok init --bot ID --issuer URL | grok prove --bot ID --issuer URL [--challenge ID [--app ID]]\n", prog)
 		return connector.GrokExitUsage
 	}
 	var r connector.GrokResult
 	if rest[0] == "init" {
 		r = connector.GrokInit(*bot, *issuer)
 	} else {
-		r = connector.GrokProve(ctx, *bot, *issuer, *challenge)
+		r = connector.GrokProve(ctx, *bot, *issuer, *challenge, *app)
 	}
 	fmt.Fprintln(stdout, r.Out)
 	return r.Code

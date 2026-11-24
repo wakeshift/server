@@ -207,15 +207,22 @@ func TestGrokFailureLimit(t *testing.T) {
 	if badProof.code != 401 || strings.TrimSpace(string(badProof.raw)) != harnesses.GrokChallengeGone {
 		t.Fatalf("bad challenge: %d %s", badProof.code, badProof.raw)
 	}
-	for i := 3; i < 20; i++ { // 20 in all, across the three routes
+	// Bad proofs from the address don't count: bots' VMs share addresses.
+	for i := range 25 {
+		if r := proveFrom(t, c, a, map[string]string{"challenge": "wakeshift:v1:register:" + strings.Repeat("A", 43) + ":" + strings.Repeat("B", 22)}); r.code != 401 {
+			t.Fatalf("bad proof %d: %d %s", i+1, r.code, r.raw)
+		}
+	}
+	if r := pageFrom(t, c, a, "/v1/stream/webhook-setup/describe", map[string]string{"token": tokens[0]}); r.code != 200 {
+		t.Fatalf("a valid describe after bad proofs only: %d %s", r.code, r.raw)
+	}
+	for i := 2; i < 20; i++ { // 20 in all, across the page's two routes
 		var r limitedAnswer
-		switch i % 3 {
+		switch i % 2 {
 		case 0:
 			r = pageFrom(t, c, a, "/v1/stream/webhook-setup/describe", map[string]string{"token": "bad" + strconv.Itoa(i)})
-		case 1:
-			r = pageFrom(t, c, a, "/v1/stream/webhook-setup", map[string]string{"token": "bad" + strconv.Itoa(i), "url": url, "key": key})
 		default:
-			r = proveFrom(t, c, a, map[string]string{"challenge": "wakeshift:v1:register:" + strings.Repeat("A", 43) + ":" + strings.Repeat("B", 22)})
+			r = pageFrom(t, c, a, "/v1/stream/webhook-setup", map[string]string{"token": "bad" + strconv.Itoa(i), "url": url, "key": key})
 		}
 		if r.code != 401 {
 			t.Fatalf("failure %d: %d %s", i+1, r.code, r.raw)
@@ -228,19 +235,18 @@ func TestGrokFailureLimit(t *testing.T) {
 	if r := pageFrom(t, c, a, "/v1/stream/webhook-setup", map[string]string{"token": tokens[0], "url": url, "key": key}); r.code != 401 || !bytes.Equal(r.raw, badSave.raw) || r.retry != 0 {
 		t.Fatalf("valid save past the failures: %d %s", r.code, r.raw)
 	}
-	k := newTestKey()
-	if r := proveFrom(t, c, a, k.form(bots[0].id, validCh)); r.code != 401 || !bytes.Equal(r.raw, badProof.raw) || r.retry != 0 {
-		t.Fatalf("valid proof past the failures: %d %s", r.code, r.raw)
-	}
 	if len(f.got()) != 0 {
 		t.Fatal("a refused save reached the webhook")
 	}
-	// Another address: the same token and challenge work.
+	// Another address: the same token works.
 	if r := pageFrom(t, c, "203.0.113.31", "/v1/stream/webhook-setup/describe", map[string]string{"token": tokens[0]}); r.code != 200 {
 		t.Fatalf("another address: %d %s", r.code, r.raw)
 	}
-	if r := proveFrom(t, c, "203.0.113.31", k.form(bots[0].id, validCh)); r.code != 200 {
-		t.Fatalf("another address's proof: %d %s", r.code, r.raw)
+	// Proofs have no limit per address: a valid one from the blocked
+	// address still works (a bot behind the same outbound address isn't
+	// locked out by someone else's failures).
+	if r := proveFrom(t, c, a, newTestKey().form(bots[0].id, validCh)); r.code != 200 {
+		t.Fatalf("a valid proof from the blocked address: %d %s", r.code, r.raw)
 	}
 }
 
@@ -337,20 +343,51 @@ func TestGrokFailedProofsAlert(t *testing.T) {
 	}
 	ch := registerCh(t, c, sub.Addition.Text)
 	alerts := func() int { return strings.Count(logs.String(), "failed proofs over the alert threshold") }
-	// 29 from many addresses (each under its own failure limit).
-	for i := range 29 {
-		if r := proveFrom(t, c, fmt.Sprintf("198.51.100.%d", i+1), map[string]string{"challenge": "$(id)"}); r.code != 401 {
+	// Malformed and unknown challenges, which anyone can send, don't count.
+	for i := range 40 {
+		form := map[string]string{"challenge": "$(id)"}
+		if i%2 == 1 {
+			form["challenge"] = "wakeshift:v1:register:" + strings.Repeat("A", 43) + ":" + strings.Repeat("B", 22)
+		}
+		if r := proveFrom(t, c, fmt.Sprintf("198.51.100.%d", i+1), form); r.code != 401 {
 			t.Fatalf("proof %d: %d %s", i+1, r.code, r.raw)
+		}
+	}
+	if alerts() != 0 {
+		t.Fatal("an alert from proofs anyone can send")
+	}
+	// Bad signatures (over another bot's ID) on real challenges count: 29
+	// (each challenge ends after 3), then the 30th alerts, naming its app.
+	k := newTestKey()
+	badOn := func(ch string) map[string]string {
+		form := k.form(bot, ch)
+		form["signature"] = k.sign(limitedBotID(9), ch)
+		return form
+	}
+	chs := []string{ch}
+	for i := range 9 {
+		b := limitedBotID(20 + i)
+		s, err := subscribe(app, caller{User: "gina", Client: "Cursor", Harness: "grok-bot", Conversation: b}, fmt.Sprintf("ci/alert%d", i), subOpts{})
+		if err != nil {
+			t.Fatal(err)
+		}
+		chs = append(chs, registerCh(t, c, s.Addition.Text))
+	}
+	n := 0
+	for _, ch := range chs {
+		for range 3 {
+			if n++; n == 30 {
+				break
+			}
+			if r := proveFrom(t, c, "198.51.100.200", badOn(ch)); r.code != 401 {
+				t.Fatalf("bad signature %d: %d %s", n, r.code, r.raw)
+			}
 		}
 	}
 	if alerts() != 0 {
 		t.Fatal("an alert before the 30th")
 	}
-	// The 30th: a bad signature (over another bot's ID) on a real
-	// challenge, which names its app.
-	k := newTestKey()
-	form := k.form(bot, ch)
-	form["signature"] = k.sign(limitedBotID(9), ch)
+	form := badOn(chs[9])
 	if r := proveFrom(t, c, "198.51.100.100", form); r.code != 401 {
 		t.Fatalf("bad signature: %d %s", r.code, r.raw)
 	}
@@ -380,7 +417,12 @@ func TestGrokFailedProofsAlert(t *testing.T) {
 	}
 	// More failures: no second alert, and still no refusal for them.
 	for i := range 5 {
-		if r := proveFrom(t, c, fmt.Sprintf("198.51.100.%d", 150+i), map[string]string{"challenge": "$(id)"}); r.code != 401 || r.retry != 0 {
+		b := limitedBotID(40 + i)
+		s, err := subscribe(app, caller{User: "gina", Client: "Cursor", Harness: "grok-bot", Conversation: b}, fmt.Sprintf("ci/more%d", i), subOpts{})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if r := proveFrom(t, c, fmt.Sprintf("198.51.100.%d", 150+i), badOn(registerCh(t, c, s.Addition.Text))); r.code != 401 || r.retry != 0 {
 			t.Fatalf("proof past the threshold: %d %s", r.code, r.raw)
 		}
 	}
@@ -423,9 +465,11 @@ func TestGrokLimitsAcrossInstances(t *testing.T) {
 	}
 }
 
-// A proof body that isn't the form the command sends counts toward the
-// address's failed checks like a bad challenge.
-func TestGrokMalformedProofsCount(t *testing.T) {
+// A proof body that isn't the form the command sends, like a bad
+// challenge, doesn't count toward the address's failed checks: proofs have
+// no limit per address, so someone sharing a bot's outbound address can't
+// lock its proofs out.
+func TestGrokMalformedProofsDontCount(t *testing.T) {
 	c := startLimited(t, nil)
 	const a = "203.0.113.95"
 	malformed := func() limitedAnswer {
@@ -434,19 +478,26 @@ func TestGrokMalformedProofsCount(t *testing.T) {
 		req.Header.Set("X-Forwarded-For", a+", 10.0.0.1")
 		return limitedDo(t, req)
 	}
-	for i := range 20 {
+	for i := range 25 {
 		if r := malformed(); r.code != 400 {
 			t.Fatalf("malformed %d: %d %s", i+1, r.code, r.raw)
 		}
+		if r := proveFrom(t, c, a, map[string]string{"challenge": "wakeshift:v1:register:" + strings.Repeat("A", 43) + ":" + strings.Repeat("B", 22)}); r.code != 401 ||
+			strings.TrimSpace(string(r.raw)) != harnesses.GrokChallengeGone {
+			t.Fatalf("unknown challenge %d: %d %s", i+1, r.code, r.raw)
+		}
 	}
-	if r := proveFrom(t, c, a, map[string]string{"challenge": "wakeshift:v1:register:" + strings.Repeat("A", 43) + ":" + strings.Repeat("B", 22)}); r.code != 401 ||
-		strings.TrimSpace(string(r.raw)) != harnesses.GrokChallengeGone {
-		t.Fatalf("after 20 malformed bodies: %d %s", r.code, r.raw)
+	if n := countPlatform(t, c, `SELECT count(*) FROM rate_counts`); n != 0 {
+		t.Fatalf("%d counts stored for proofs", n)
 	}
-	var n int
-	c.DB.Pool.QueryRow(ctx, `SELECT coalesce(max(n), 0) FROM rate_counts`).Scan(&n)
-	if n < 20 {
-		t.Fatalf("malformed bodies counted %d times, want 20", n)
+	app := noteApp(t, c, "ci")
+	bot := limitedBotID(70)
+	sub, err := subscribe(app, caller{User: "gina", Client: "Cursor", Harness: "grok-bot", Conversation: bot}, "ci/malformed", subOpts{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if r := proveFrom(t, c, a, newTestKey().form(bot, registerCh(t, c, sub.Addition.Text))); r.code != 200 {
+		t.Fatalf("a valid proof from the address: %d %s", r.code, r.raw)
 	}
 }
 

@@ -13,6 +13,7 @@ import (
 	"net/netip"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -47,20 +48,36 @@ const (
 	maxBackoff = 10 * time.Minute
 )
 
-// DefaultSpacing is Deliverer.Spacing's default (tests shorten it before
-// the core starts).
-var DefaultSpacing = time.Second
+// defaultSpacing and backoffBase are DefaultSpacing's and BackoffBase's
+// values, as nanoseconds: atomic, since the deliverer's goroutines read
+// them while a test may change them (SetTestTimings).
+var defaultSpacing, backoffBase atomic.Int64
+
+func init() {
+	defaultSpacing.Store(int64(time.Second))
+	backoffBase.Store(int64(15 * time.Second))
+}
+
+// DefaultSpacing is Deliverer.Spacing's default.
+func DefaultSpacing() time.Duration { return time.Duration(defaultSpacing.Load()) }
 
 // BackoffBase is the wait after a destination's first failure; each next
-// one waits twice as long, up to maxBackoff (tests shorten it).
-var BackoffBase = 15 * time.Second
+// one waits twice as long, up to maxBackoff.
+func BackoffBase() time.Duration { return time.Duration(backoffBase.Load()) }
+
+// SetTestTimings shortens BackoffBase and DefaultSpacing for a test, until
+// the returned func restores them.
+func SetTestTimings(backoff, spacing time.Duration) (restore func()) {
+	b, s := backoffBase.Swap(int64(backoff)), defaultSpacing.Swap(int64(spacing))
+	return func() { backoffBase.Store(b); defaultSpacing.Store(s) }
+}
 
 // Backoff is the wait after a destination's n-th consecutive failure.
 func Backoff(n int) time.Duration {
 	if n > 10 {
 		return maxBackoff
 	}
-	return min(BackoffBase<<max(n-1, 0), maxBackoff)
+	return min(BackoffBase()<<max(n-1, 0), maxBackoff)
 }
 
 // holderPrefix starts every Deliverer's holder (a destination's
@@ -139,7 +156,10 @@ type Deliverer struct {
 	once   sync.Once
 	holder string
 	slots  chan struct{}
-	woken  *wakeQueue
+	// sends are the sends deliver started, which Run waits for before it
+	// returns, so none outlives it.
+	sends sync.WaitGroup
+	woken *wakeQueue
 	// gate holds Wake's agents until it's read that their workspace has a
 	// destination (agent_webhook_targets), so a workspace without one
 	// costs no claim transaction.
@@ -165,7 +185,7 @@ func (d *Deliverer) spacing() time.Duration {
 	case d.Spacing < 0:
 		return 0
 	case d.Spacing == 0:
-		return DefaultSpacing
+		return DefaultSpacing()
 	}
 	return d.Spacing
 }
@@ -198,6 +218,9 @@ func (d *Deliverer) hasTargets(ctx context.Context, tenants []string) (map[strin
 // Poll.
 func (d *Deliverer) Run(ctx context.Context) {
 	d.init()
+	// Its workers first (no new sends), then the sends they started: those
+	// see ctx end, and only record what happened.
+	defer d.sends.Wait()
 	var wg sync.WaitGroup
 	defer wg.Wait()
 	wg.Go(func() {
@@ -266,7 +289,9 @@ func (d *Deliverer) deliver(ctx context.Context, tenant, agent string) {
 		return
 	}
 	for _, c := range got {
+		d.sends.Add(1)
 		go func() {
+			defer d.sends.Done()
 			defer func() { <-d.slots }()
 			if d.send(ctx, c) {
 				d.woken.add(wake{tenant: c.tenant, agent: c.agent})

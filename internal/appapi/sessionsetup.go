@@ -1,13 +1,12 @@
 package appapi
 
-// Session-only setup, sent when it's picked (docs/harnesses.md). Claude
+// Session-only setup, sent when it's picked. Claude
 // Code's install offer asks the user how to be notified: in every session
 // (Wakeshift's plugin), only while this session is open, or not at all. The
 // steps for "this session" (the link file, the Monitor's command, how to
 // treat what arrives) aren't in the offer: a private link, a file to
 // write and a command, offered before the user has chosen, read to agents
-// as an injection and the offer was set aside (the install-offer
-// experiments, November 12, 2026). The offer carries a one-time URL instead,
+// as an injection and the offer was set aside. The offer carries a one-time URL instead,
 // which the agent fetches with curl only once the user picks this session:
 //
 //	GET /v1/stream/setup?token=wsu_<tenant>_<secret>
@@ -21,7 +20,7 @@ package appapi
 //
 // It's a fetch of instructions from Wakeshift, not a call to the app's
 // tools: the app's tool, which may have side effects, is never called again
-// (fallback-like-today; "No result asks for another call").
+// (no result asks the agent for another call).
 
 import (
 	"context"

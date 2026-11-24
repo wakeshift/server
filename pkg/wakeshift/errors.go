@@ -1,6 +1,6 @@
 package wakeshift
 
-// One error hierarchy, the same in the three SDKs (design §2.10): an
+// One error hierarchy, the same in the three SDKs: an
 // *APIError when talking to Wakeshift failed (it refused, or didn't answer:
 // Status 0), and a *UsageError for a mistake caught before sending. Both
 // carry a Code from one list, which errors.json pins (codes), and IsCode

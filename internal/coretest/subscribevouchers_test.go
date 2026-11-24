@@ -120,9 +120,17 @@ func voucherApp(t *testing.T, c *coretest.Core, id string) *wakeshift.Client {
 	return app
 }
 
-// anonCall is a ChatGPT tool call without a verified user, to the app's
-// tool watch_job; userCall is one with user.
-func anonCall() map[string]any { return map[string]any{"client": "openai-mcp", "tool": "watch_job"} }
+// anonCall is a tool call without a verified user, to the app's tool
+// watch_job, on a transport session (anonTransport: an anonymous voucher
+// is handed out only bound to one); unboundCall is one on none (ChatGPT's,
+// whose protocol has no sessions); userCall is one with user.
+func anonCall() map[string]any {
+	return map[string]any{"client": "openai-mcp", "tool": "watch_job", "transport_session": anonTransport}
+}
+func unboundCall() map[string]any { return map[string]any{"client": "openai-mcp", "tool": "watch_job"} }
+
+var anonTransport = strings.Repeat("ef", 32)
+
 func userCall(user string) map[string]any {
 	return map[string]any{"client": "openai-mcp", "tool": "watch_job", "user": user}
 }
@@ -400,17 +408,42 @@ func TestVoucherCaps(t *testing.T) {
 	}
 }
 
-// An anonymous redemption, end to end, as ChatGPT makes it (§6.2, §11.3):
-// an emit between the hand-out and the subscribe is replayed exactly once
-// and nothing older is; the subscription is the tool's (via tool:<name>)
-// in a new anonymous workspace, audited there; later emits are delivered;
-// the refresh rules (same URL and secret; no rotation; no new URL; not
-// without the voucher) and unsubscribing by voucher and URL.
+// An anonymous redemption, end to end (§6.2, §11.3), on a transport
+// session: an emit between the hand-out and the subscribe is replayed
+// exactly once and nothing older is; the subscription is the tool's (via
+// tool:<name>) in a new anonymous workspace, audited there; later emits
+// are delivered; the refresh rules (same URL and secret; no rotation; no
+// new URL; not without the voucher) and unsubscribing by voucher and URL.
+//
+// Anonymous without a transport session (ChatGPT's, whose protocol has
+// none), a voucher would be bound to nothing: a bearer token for whoever
+// reads it in the conversation's text. So none is handed out (logged as
+// no_session), and one from before that is refused, as push refuses it.
 func TestVoucherRedeemAnonymous(t *testing.T) {
 	eventsTestSetup(t)
 	c := coretest.Start(t)
 	app := voucherApp(t, c, "chat")
 	hook := newVoucherHook(t)
+
+	if text, v := handOut(t, c, app, unboundCall(), "chat.message", eng, nil); v != "" || text != "" {
+		t.Fatalf("anonymous without a transport session: %q", text)
+	}
+	var reason string
+	c.DB.Pool.QueryRow(ctx, `SELECT detail->>'reason' FROM app_log WHERE app_id = 'chat' AND action = 'app.voucher_not_issued'`).Scan(&reason)
+	if reason != "no_session" {
+		t.Fatalf("not issued, logged as %q", reason)
+	}
+	_, legacy := handOut(t, c, app, anonCall(), "chat.message", eng, nil)
+	if _, err := c.DB.Pool.Exec(ctx, `UPDATE subscribe_vouchers SET transport_session = NULL WHERE token_hash = sha256(convert_to($1::text, 'UTF8'))`, legacy); err != nil {
+		t.Fatal(err)
+	}
+	for _, call := range []map[string]any{unboundCall(), anonCall(), userCall("ada")} {
+		code, raw := redeem(t, c, app, redeemReq(call, "chat.message", eng, legacy, delivery(hook.url("legacy"), voucherSecret()), nil))
+		wantBadVoucher(t, "an unbound anonymous voucher", code, raw)
+	}
+	if hook.verified("legacy") != 0 {
+		t.Fatal("an unbound voucher's callback was verified")
+	}
 
 	emitChat(t, c, app, "old") // before the hand-out
 	time.Sleep(20 * time.Millisecond)
@@ -497,8 +530,49 @@ func TestVoucherRedeemAnonymous(t *testing.T) {
 	}
 	code, raw = redeem(t, c, app, redeemReq(anonCall(), "chat.message", eng, tok, dl, nil))
 	wantBadVoucher(t, "refreshing an ended subscription", code, raw)
-	if got := refusedReasons(t, c, "chat"); fmt.Sprint(got) != "[rotation used used]" {
+	if got := refusedReasons(t, c, "chat"); fmt.Sprint(got) != "[no_session no_session no_session rotation used used]" {
 		t.Fatalf("logged: %v", got)
+	}
+}
+
+// A subscription made with an anonymous voucher bound to no transport
+// session (handed out before those stopped) isn't renewed through it: the
+// refresh is refused as a redemption would be (bad_voucher, logged as
+// no_session), the subscription stays as it was until its ttl, and the
+// voucher reaches nothing new.
+func TestVoucherUnboundRefreshRefused(t *testing.T) {
+	eventsTestSetup(t)
+	c := coretest.Start(t)
+	app := voucherApp(t, c, "chat")
+	hook := newVoucherHook(t)
+	_, tok := handOut(t, c, app, anonCall(), "chat.message", eng, nil)
+	dl := delivery(hook.url("a"), voucherSecret())
+	r := mustRedeem(t, c, app, redeemReq(anonCall(), "chat.message", eng, tok, dl, map[string]any{"ttl_ms": 3600000}))
+	if !r.Created {
+		t.Fatalf("redeemed: %+v", r)
+	}
+	liveUntil := func() (lu time.Time) {
+		t.Helper()
+		c.DB.Pool.QueryRow(ctx, `SELECT live_until FROM subscribe_vouchers WHERE token_hash = sha256(convert_to($1::text, 'UTF8'))`, tok).Scan(&lu)
+		return lu
+	}
+	// As one handed out before: bound to nothing.
+	if _, err := c.DB.Pool.Exec(ctx, `UPDATE subscribe_vouchers SET transport_session = NULL WHERE token_hash = sha256(convert_to($1::text, 'UTF8'))`, tok); err != nil {
+		t.Fatal(err)
+	}
+	before := liveUntil()
+	for _, call := range []map[string]any{unboundCall(), anonCall(), userCall("ada")} {
+		code, raw := redeem(t, c, app, redeemReq(call, "chat.message", eng, tok, dl, map[string]any{"ttl_ms": 3600000}))
+		wantBadVoucher(t, "refreshing with an unbound voucher", code, raw)
+	}
+	if got := refusedReasons(t, c, "chat"); fmt.Sprint(got) != "[no_session no_session no_session]" {
+		t.Fatalf("logged: %v", got)
+	}
+	if after := liveUntil(); !after.Equal(before) {
+		t.Fatalf("renewed: %v → %v", before, after)
+	}
+	if hook.verified("a") != 1 {
+		t.Fatalf("verified %d times", hook.verified("a"))
 	}
 }
 
@@ -743,14 +817,14 @@ func TestVoucherExpiryAndVerification(t *testing.T) {
 	_, tok = handOut(t, c, app, anonCall(), "chat.message", eng, nil)
 	// Private, loopback, link-local, metadata and NAT64-wrapped private
 	// targets: refused at connect time, before any packet.
-	mcpevents.AllowLoopback = false
+	mcpevents.SetAllowLoopback(false)
 	for _, target := range []string{"https://169.254.169.254/latest", "https://metadata.google.internal/x", "https://[::ffff:10.0.0.1]/x"} {
 		code, raw := redeem(t, c, app, redeemReq(anonCall(), "chat.message", eng, tok, delivery(target, voucherSecret()), nil))
 		if code != 400 || string(raw) != generic {
 			t.Fatalf("%s: %d %s", target, code, raw)
 		}
 	}
-	mcpevents.AllowLoopback = true
+	mcpevents.SetAllowLoopback(true)
 	if got := voucherCol[int](t, c, tok, "verify_failures"); got != 3 {
 		t.Fatalf("failures: %d", got)
 	}
@@ -760,9 +834,9 @@ func TestVoucherExpiryAndVerification(t *testing.T) {
 		t.Fatal("the fourth try was verified")
 	}
 	_, tok = handOut(t, c, app, anonCall(), "chat.message", eng, nil)
-	mcpevents.AllowLoopback = false
+	mcpevents.SetAllowLoopback(false)
 	code, raw = redeem(t, c, app, redeemReq(anonCall(), "chat.message", eng, tok, delivery("https://[64:ff9b::a00:1]/x", voucherSecret()), nil))
-	mcpevents.AllowLoopback = true
+	mcpevents.SetAllowLoopback(true)
 	if code != 400 || string(raw) != generic {
 		t.Fatalf("NAT64: %d %s", code, raw)
 	}
@@ -821,7 +895,7 @@ func TestVoucherFanout(t *testing.T) {
 	wantBadVoucher(t, "the 101st on one key", code, raw)
 	// A signed-in user isn't counted against it.
 	_, utok := handOut(t, c, app, anonCall(), "chat.message", eng, nil)
-	mustRedeem(t, c, app, redeemReq(userCall("ada"), "chat.message", eng, utok, delivery(hook.url("ada"), voucherSecret()), nil))
+	mustRedeem(t, c, app, redeemReq(mergeMap(userCall("ada"), map[string]any{"transport_session": anonTransport}), "chat.message", eng, utok, delivery(hook.url("ada"), voucherSecret()), nil))
 	// Per app.
 	seed("other", 1900)
 	ops := map[string]any{"channel": "ops"}
@@ -847,7 +921,8 @@ func TestVoucherWorkspaces(t *testing.T) {
 	app := voucherApp(t, c, "chat")
 	hook := newVoucherHook(t)
 	_, tok := handOut(t, c, app, anonCall(), "chat.message", eng, nil)
-	mustRedeem(t, c, app, redeemReq(userCall("cy"), "chat.message", eng, tok, delivery(hook.url("cy"), voucherSecret()), nil))
+	// On the transport session it was handed out on (it's bound to it).
+	mustRedeem(t, c, app, redeemReq(mergeMap(userCall("cy"), map[string]any{"transport_session": anonTransport}), "chat.message", eng, tok, delivery(hook.url("cy"), voucherSecret()), nil))
 	tenant := userTenant(t, c, "chat", "cy")
 	if voucherCol[string](t, c, tok, "tenant_id::text") != tenant {
 		t.Fatal("not in cy's workspace")
@@ -1110,6 +1185,7 @@ func TestVoucherOtherClient(t *testing.T) {
 	wantBadVoucher(t, "another user", code, raw)
 	mustRedeem(t, c, app, redeemReq(userCall("ada"), "chat.message", eng, tok, delivery(hook.url("ada"), voucherSecret()), nil))
 	delete(cc, "user")
+	cc["transport_session"] = anonTransport // an anonymous voucher is handed out only bound to one
 	_, tok = handOut(t, c, app, cc, "chat.message", eng, nil)
 	mustRedeem(t, c, app, redeemReq(anonCall(), "chat.message", eng, tok, delivery(hook.url("x"), voucherSecret()), nil))
 	code, raw = redeem(t, c, app, redeemReq(anonCall(), "chat.message", eng, tok, delivery(hook.url("y"), voucherSecret()), nil))
@@ -1118,15 +1194,21 @@ func TestVoucherOtherClient(t *testing.T) {
 
 // ChatGPT's Work chats call tools and events/* through Codex: no client
 // name on a stateless server, and the User-Agent "openai-mcp/1.0.0
-// (Codex)" (the voucher probe, November 5, 2026). The core recognizes it as
-// ChatGPT, hands out a voucher and redeems it, as for "openai-mcp/1.0.0".
+// (Codex)", as observed. The core recognizes it as
+// ChatGPT, hands out a voucher and redeems it, as for "openai-mcp/1.0.0":
+// to a signed-in user. Anonymous, it has no transport session (the
+// protocol has none), so it gets no voucher: one bound to nothing would be
+// a bearer token for whoever reads it.
 func TestVoucherChatGPTThroughCodex(t *testing.T) {
 	eventsTestSetup(t)
 	c := coretest.Start(t)
 	app := voucherApp(t, c, "chat")
 	hook := newVoucherHook(t)
 	for i, ua := range []string{"openai-mcp/1.0.0 (Codex)", "openai-mcp/1.0.0"} {
-		call := map[string]any{"user_agent": ua, "tool": "watch_job"}
+		if _, tok := handOut(t, c, app, map[string]any{"user_agent": ua, "tool": "watch_job"}, "chat.message", eng, nil); tok != "" {
+			t.Fatalf("%s, anonymous without a transport session: a voucher", ua)
+		}
+		call := map[string]any{"user_agent": ua, "tool": "watch_job", "user": fmt.Sprint("u", i)}
 		text, tok := handOut(t, c, app, call, "chat.message", eng, nil)
 		if tok == "" {
 			t.Fatalf("%s: no voucher: %s", ua, text)

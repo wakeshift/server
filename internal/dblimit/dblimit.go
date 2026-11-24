@@ -10,11 +10,13 @@
 package dblimit
 
 import (
+	"bytes"
 	"context"
 	"crypto/hmac"
 	"crypto/sha256"
 	"errors"
 	"math"
+	"slices"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -84,6 +86,60 @@ func (c *Counter) Take(ctx context.Context, q Querier, l Limit, subject string, 
 		return true, 0, nil
 	}
 	return false, retryAfter(ends, now), nil
+}
+
+// Count is one subject under one limit, for TakeAll.
+type Count struct {
+	Limit   Limit
+	Subject string
+}
+
+// Beginner starts transactions: a pool.
+type Beginner interface {
+	Begin(ctx context.Context) (pgx.Tx, error)
+}
+
+// TakeAll counts one request under every one of counts, or under none:
+// if any is past its limit, nothing is counted (the transaction they were
+// counted in rolls back) and refused is that limit. The rows are counted
+// in one order whatever the order of counts, and each stays locked until
+// the transaction ends, so concurrent TakeAlls are serialized on the
+// subjects they share, without deadlocks: none can count past a limit, or
+// use up a place under one limit while another refuses it.
+func (c *Counter) TakeAll(ctx context.Context, db Beginner, counts []Count, now time.Time) (refused *Limit, err error) {
+	sorted := slices.Clone(counts)
+	slices.SortFunc(sorted, func(x, y Count) int {
+		return bytes.Compare(c.id(x.Limit.Name, x.Subject), c.id(y.Limit.Name, y.Subject))
+	})
+	sorted = slices.CompactFunc(sorted, func(x, y Count) bool { return x.Limit.Name == y.Limit.Name && x.Subject == y.Subject })
+	tx, err := db.Begin(ctx)
+	if err != nil {
+		return nil, err
+	}
+	defer tx.Rollback(ctx)
+	for _, ct := range sorted {
+		ok, _, err := c.Take(ctx, tx, ct.Limit, ct.Subject, now)
+		if err != nil {
+			return nil, err
+		}
+		if !ok {
+			l := ct.Limit
+			return &l, nil
+		}
+	}
+	return nil, tx.Commit(ctx)
+}
+
+// GiveBack uncounts one request TakeAll (or Take) counted by subject under
+// l at taken: for a limit that counts only what turns out a certain way
+// (a failure), counted up front so concurrent requests can't all pass
+// before any is counted, and given back once it turned out otherwise. A
+// window that started after taken (the count it was in is over) is left
+// as it is.
+func (c *Counter) GiveBack(ctx context.Context, q Querier, l Limit, subject string, taken time.Time) error {
+	_, err := q.Exec(ctx, `UPDATE rate_counts SET n = n - 1 WHERE key = $1 AND n > 0 AND started_at <= $2 AND expires_at > $2`,
+		c.id(l.Name, subject), taken)
+	return err
 }
 
 // Over reports, without counting, whether subject has used up l at now

@@ -1,8 +1,10 @@
 // Package agenthooks is agent-hosted webhook delivery: a conversation
 // whose harness wakes it when a URL the agent made is POSTed to registers
-// that URL, and Wakeshift POSTs the conversation's messages there. Capy is
-// the one harness so far: an agent creates an incoming_webhook watch on its
-// own thread (capy.subscribe), which returns
+// that URL, and Wakeshift POSTs the conversation's messages there. Two
+// harnesses work this way. Grok Bot's is a Cursor Automations routine's
+// webhook, whose URL and key the user pastes (cursor.go). Capy's is below:
+// an agent creates an incoming_webhook watch on its own thread
+// (capy.subscribe), which returns
 // https://api.capy.ai/webhooks/automations/<secret>, and each POST to it
 // wakes the thread, even idle, with no process or awake machine.
 //

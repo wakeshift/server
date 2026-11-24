@@ -67,7 +67,7 @@ func TestOfferable(t *testing.T) {
 }
 
 // @wakeshift/pi on npm with only its placeholder on "latest" (npm put it
-// there when the placeholder was published, November 8, 2026): production
+// there when the placeholder was published): production
 // keeps offering Wakeshift's installer; the first release on "latest" moves
 // the offer to pi's own command.
 func TestPiPlaceholderNotOffered(t *testing.T) {

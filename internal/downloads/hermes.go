@@ -78,7 +78,7 @@ func (s *Server) hermesDownload(w http.ResponseWriter, r *http.Request) {
 }
 
 // What /install/hermes.sh exits with (site/docs/hermes.md lists them for
-// partners whose installers run it). 2 is left to the shell: it's what sh
+// third-party installers that run it). 2 is left to the shell: it's what sh
 // exits with on a syntax error, such as a script cut short.
 const (
 	HermesExitOK          = 0          // installed (or updated) and enabled
@@ -98,7 +98,7 @@ const (
 // root on a Hermes home that belongs to another user (Hermes's Docker image,
 // through docker exec), it runs as that user, as Hermes's own command does,
 // so nothing it writes is root's. --quiet and --chained are for another
-// installer that runs it (a partner's, before any chat).
+// installer that runs it (a third-party one, before any chat).
 //
 // It's one function called on its last line, so a download cut short is a
 // syntax error (2), never a half-run install.
@@ -353,12 +353,25 @@ if [ "$(id -u)" = 0 ] && [ -z "${WAKESHIFT_AS_ROOT:-}" ] && [ -d "$home" ]; then
       exit 6
     fi
     # A plugin an earlier run left root's is handed to its user: the
-    # directory and what's directly in it, never through a link (find
-    # doesn't follow them, and chown -h changes a link, not its target, so
-    # one swapped in meanwhile changes nothing else).
+    # directory and what's directly in it. $owner controls the Hermes home,
+    # so nothing is followed there: the plugin's directory and plugins/ may
+    # not be links, and the directory must be the Hermes home's own (its
+    # real path). It's done from inside the directory (a link swapped into
+    # the path meanwhile changes nothing) and only if the directory isn't
+    # $owner's yet (they can't change what's in it until it's theirs):
+    # what's directly in it first, the directory itself last, never a link
+    # (chown -h changes a link, not its target) or a file with another hard
+    # link (another file's).
     dir="$home/plugins/wakeshift"
-    if [ -d "$dir" ] && [ ! -L "$dir" ] && grep -q "%[4]s" "$dir/__init__.py" 2>/dev/null; then
-      find "$dir" -maxdepth 1 ! -type l -exec chown -h "$owner:$(id -g "$owner")" {} + 2>/dev/null || true
+    if [ -d "$dir" ] && [ ! -L "$home/plugins" ] && [ ! -L "$dir" ]; then
+      (
+        real=$(cd -P "$home" 2>/dev/null && pwd -P) || exit 0
+        cd -P "$dir" 2>/dev/null || exit 0
+        [ "$(pwd -P)" = "$real/plugins/wakeshift" ] || exit 0
+        [ -z "$(find . -maxdepth 0 -user "$owner" -print 2>/dev/null)" ] || exit 0
+        grep -q "%[4]s" ./__init__.py 2>/dev/null || exit 0
+        find . -maxdepth 1 -depth \( -type d -o -type f -links 1 \) -exec chown -h "$owner:$(id -g "$owner")" {} + 2>/dev/null || true
+      )
     fi
     HERMES_HOME=$home
     export HERMES_HOME

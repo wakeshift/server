@@ -1015,7 +1015,7 @@ def _rfc3339(s: str) -> str:
 
 def _poll_result(out: Mapping[str, Any]) -> dict[str, Any]:
     """An events/poll result: what Wakeshift answered, in the draft's names
-    (tests/golden/mcp-events-wire.json)."""
+    (the shared golden file mcp-events-wire.json)."""
     return {
         "resultType": RESULT_TYPE,
         "events": list(out.get("events") or []),

@@ -217,7 +217,7 @@ test("S7: tier 1 needs automatic re-arm, tier 2 allows one nudge", () => {
   assert.equal(grade(r("S7", "opencode", { nudges: 1, wake_ms: null }), tierOf(tiers, "opencode")).grade, "pass");
 });
 
-test("tier 3: best effort, no bars beyond works", () => {
+test("tier 3: no bars beyond works", () => {
   assert.equal(grade(r("S2", "antigravity", { p50_ms: 60000 }), tierOf(tiers, "antigravity")).grade, "pass");
   assert.equal(grade(r("S2", "antigravity", {}, false), tierOf(tiers, "antigravity")).grade, "fail");
 });

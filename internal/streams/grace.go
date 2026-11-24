@@ -17,7 +17,8 @@ package streams
 // Only for the link that was still the session's to use:
 //   - a session's link of a kind that rotates: a connector's (it redeemed a
 //     ticket) or a sliding one (Monitor's and background commands');
-//   - expired, within RenewGrace, and not revoked;
+//   - expired, within RenewGrace (a sliding one, whose URL is in the
+//     agent's text: TextLinkGrace), and not revoked;
 //   - the latest of its chain: no other link for the same agent and
 //     session, with acks or without as it, from a connector or not as it,
 //     was made at or after it (a rotation's successor, a newer redeem, a
@@ -49,6 +50,14 @@ import (
 // still renew it (the grace path). Links are deleted a day after they
 // expire (appapi.CleanUp), so this is as long as the record lasts.
 const RenewGrace = 24 * time.Hour
+
+// TextLinkGrace is RenewGrace for a sliding link (the Monitor's and the
+// background commands'): its URL is in the command the agent runs, so in
+// the conversation's text and transcript, where others may read it. A
+// copy renews only within this long, enough for a night's sleep. A
+// connector's link, which its hooks keep out of the text, keeps
+// RenewGrace (a plugin's waiter has slept 17 hours).
+const TextLinkGrace = 12 * time.Hour
 
 // errNoGrace: the link can't be renewed; the request is refused as before.
 var errNoGrace = errors.New("streams: the link can't be renewed")
@@ -114,8 +123,11 @@ func (s *Server) renewExpired(ctx context.Context, c claims, header string, chec
 			l.SlideUntil = *slide
 		}
 		// A session's link of a kind that rotates, expired within the
-		// grace, not revoked.
+		// grace (a sliding one's is shorter: TextLinkGrace), not revoked.
 		if revoked || !expired || !recent || l.Target != target || l.Agent != agent || (l.Connector == "" && l.SlideUntil.IsZero()) {
+			return errNoGrace
+		}
+		if !l.SlideUntil.IsZero() && time.Since(l.ExpiresAt) > TextLinkGrace {
 			return errNoGrace
 		}
 		// Its creator still in the workspace, its grant live.

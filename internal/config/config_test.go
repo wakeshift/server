@@ -1,6 +1,9 @@
 package config
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 func TestFromEnv(t *testing.T) {
 	good := map[string]string{
@@ -244,6 +247,40 @@ func TestProxyHops(t *testing.T) {
 	}
 	for _, v := range []string{"-1", "two"} {
 		t.Setenv("WAKESHIFT_PROXY_HOPS", v)
+		if _, err := FromEnv(); err == nil {
+			t.Errorf("%q accepted", v)
+		}
+	}
+	// Grok's request limits count per client address: on, the number of
+	// proxies must be given, 0 included, never taken as the default.
+	t.Setenv("WAKESHIFT_GROK_RATE_LIMITS", "1")
+	t.Setenv("WAKESHIFT_PROXY_HOPS", "")
+	if _, err := FromEnv(); err == nil || !strings.Contains(err.Error(), "WAKESHIFT_PROXY_HOPS") {
+		t.Errorf("rate limits on without WAKESHIFT_PROXY_HOPS: %v", err)
+	}
+	for v, want := range map[string]int{"0": 0, "2": 2} {
+		t.Setenv("WAKESHIFT_PROXY_HOPS", v)
+		if c, err := FromEnv(); err != nil || !c.Grok.RateLimits || c.ProxyHops != want {
+			t.Errorf("rate limits on, %q proxies: %d (%v)", v, c.ProxyHops, err)
+		}
+	}
+}
+
+// Unset, WAKESHIFT_MAX_STREAMS is DefaultMaxStreams, not unlimited; 0 still
+// turns the cap off.
+func TestMaxStreams(t *testing.T) {
+	t.Setenv("DATABASE_URL", "postgres://x")
+	t.Setenv("WAKESHIFT_SECRET_KEY", "0123456789abcdef0123456789abcdef-random")
+	t.Setenv("WAKESHIFT_PUBLIC_URL", "https://wakeshift.dev")
+	for v, want := range map[string]int{"": DefaultMaxStreams, "0": 0, "50": 50} {
+		t.Setenv("WAKESHIFT_MAX_STREAMS", v)
+		c, err := FromEnv()
+		if err != nil || c.MaxStreams != want {
+			t.Errorf("%q: %d (%v), want %d", v, c.MaxStreams, err, want)
+		}
+	}
+	for _, v := range []string{"-1", "many"} {
+		t.Setenv("WAKESHIFT_MAX_STREAMS", v)
 		if _, err := FromEnv(); err == nil {
 			t.Errorf("%q accepted", v)
 		}

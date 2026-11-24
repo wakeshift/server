@@ -7,8 +7,8 @@ import (
 )
 
 // A resync wakes every Resync waiter, but spread out rather than all at
-// once: each wake is a claim transaction, and ~900 at once saturated an
-// instance's pool on every listener reconnect. A few waiters are woken at
+// once: each wake is a claim transaction, and hundreds at once can
+// saturate an instance's pool on every listener reconnect. A few waiters are woken at
 // once.
 func TestResyncSpreadsWakes(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())

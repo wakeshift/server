@@ -46,13 +46,16 @@ type Key struct {
 	CreatedAt  time.Time  `json:"created_at"`
 	LastUsedAt *time.Time `json:"last_used_at,omitempty"`
 	RevokedAt  *time.Time `json:"revoked_at,omitempty"`
+	// Via is ViaCLILink for a key registered from @wakeshift/cli's link;
+	// empty for one the console made.
+	Via string `json:"via,omitempty"`
 }
 
-const keyColumns = `key_id, name, created_at, last_used_at, revoked_at`
+const keyColumns = `key_id, name, created_at, last_used_at, revoked_at, coalesce(via, '')`
 
 func scanKey(row pgx.Row) (Key, error) {
 	var k Key
-	err := row.Scan(&k.ID, &k.Name, &k.CreatedAt, &k.LastUsedAt, &k.RevokedAt)
+	err := row.Scan(&k.ID, &k.Name, &k.CreatedAt, &k.LastUsedAt, &k.RevokedAt, &k.Via)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return k, ErrNoKey
 	}
@@ -67,14 +70,15 @@ type activeKey struct {
 	name     string
 	public   ed25519.PublicKey
 	lastUsed *time.Time
+	role     orgs.Role // its maker's role when they made it ("": none, keyOrigin)
 }
 
-const activeKeyColumns = `app_id, key_id, kid, name, public_key, last_used_at`
+const activeKeyColumns = `app_id, key_id, kid, name, public_key, last_used_at, coalesce(created_role, '')`
 
 func scanActiveKey(row pgx.Row) (activeKey, error) {
 	var k activeKey
 	var pub []byte
-	err := row.Scan(&k.app, &k.id, &k.kid, &k.name, &pub, &k.lastUsed)
+	err := row.Scan(&k.app, &k.id, &k.kid, &k.name, &pub, &k.lastUsed, &k.role)
 	k.public = pub
 	if err == nil && len(pub) != ed25519.PublicKeySize {
 		err = fmt.Errorf("apps: %s's key %s is malformed", k.app, k.id)
@@ -154,17 +158,28 @@ func (r *Registry) forKeys(ctx context.Context, tx pgx.Tx, user, id string) erro
 }
 
 // forNewKey is forKeys for a change that makes a key: a suspended app gets
-// none (revoking one is still fine).
-func (r *Registry) forNewKey(ctx context.Context, tx pgx.Tx, user, id string) error {
+// none (revoking one is still fine). It returns the new key's origin: user,
+// with their role, made in the console.
+func (r *Registry) forNewKey(ctx context.Context, tx pgx.Tx, user, id string) (keyOrigin, error) {
 	o, err := r.forChange(ctx, tx, user, id, orgs.AppKeys)
 	if err == nil && o.SuspendedAt != nil {
 		err = ErrSuspended
 	}
-	return err
+	return keyOrigin{by: userActor(user), role: o.Role}, err
+}
+
+// keyOrigin is where a key came from: who made it (user:<id>), their role
+// in the app's organization then, and how (via: "" for the console,
+// ViaCLILink for @wakeshift/cli's link). The role bounds what the key may
+// do through the app API (App.KeyMay).
+type keyOrigin struct {
+	by   string
+	role orgs.Role
+	via  string
 }
 
 // insertKey makes a key for app id, returning it once.
-func (r *Registry) insertKey(ctx context.Context, tx pgx.Tx, id, name, by string) (Key, string, error) {
+func (r *Registry) insertKey(ctx context.Context, tx pgx.Tx, id, name string, from keyOrigin) (Key, string, error) {
 	key, pub, err := newKey()
 	if err != nil {
 		return Key{}, "", err
@@ -176,8 +191,9 @@ func (r *Registry) insertKey(ctx context.Context, tx pgx.Tx, id, name, by string
 		}
 		return Key{}, "", err
 	}
-	k, err := scanKey(tx.QueryRow(ctx, `INSERT INTO app_keys (app_id, key_id, kid, name, public_key, created_by) VALUES ($1, $2, $3, $4, $5, $6) RETURNING `+keyColumns,
-		id, KeyID(pub), appkey.KeyID(pub), name, []byte(pub), by))
+	k, err := scanKey(tx.QueryRow(ctx, `INSERT INTO app_keys (app_id, key_id, kid, name, public_key, created_by, created_role, via)
+		VALUES ($1, $2, $3, $4, $5, $6, nullif($7, ''), nullif($8, '')) RETURNING `+keyColumns,
+		id, KeyID(pub), appkey.KeyID(pub), name, []byte(pub), from.by, string(from.role), from.via))
 	return k, key, err
 }
 
@@ -211,7 +227,8 @@ func (r *Registry) CreateKey(ctx context.Context, tx pgx.Tx, user, id, name stri
 	if err != nil {
 		return Key{}, "", err
 	}
-	if err := r.forNewKey(ctx, tx, user, id); err != nil {
+	from, err := r.forNewKey(ctx, tx, user, id)
+	if err != nil {
 		return Key{}, "", err
 	}
 	if err := checkKeyRate(ctx, tx, id); err != nil {
@@ -222,7 +239,7 @@ func (r *Registry) CreateKey(ctx context.Context, tx pgx.Tx, user, id, name stri
 	} else if n >= MaxKeys {
 		return Key{}, "", ErrTooManyKeys
 	}
-	k, key, err := r.insertKey(ctx, tx, id, name, userActor(user))
+	k, key, err := r.insertKey(ctx, tx, id, name, from)
 	if err != nil {
 		return Key{}, "", err
 	}
@@ -286,7 +303,9 @@ func (r *Registry) RenameKey(ctx context.Context, tx pgx.Tx, user, id, keyID, na
 // (there's no overlap; for one, create a key and revoke the old one
 // later).
 func (r *Registry) RotateKey(ctx context.Context, tx pgx.Tx, user, id, keyID string) (Key, string, error) {
-	if err := r.forNewKey(ctx, tx, user, id); err != nil {
+	// The new key is the rotator's: their role, made in the console.
+	from, err := r.forNewKey(ctx, tx, user, id)
+	if err != nil {
 		return Key{}, "", err
 	}
 	if err := checkKeyRate(ctx, tx, id); err != nil {
@@ -299,7 +318,7 @@ func (r *Registry) RotateKey(ctx context.Context, tx pgx.Tx, user, id, keyID str
 	if _, err := revokeKey(ctx, tx, id, keyID, userActor(user)); err != nil {
 		return Key{}, "", err
 	}
-	k, key, err := r.insertKey(ctx, tx, id, old.Name, userActor(user))
+	k, key, err := r.insertKey(ctx, tx, id, old.Name, from)
 	if err != nil {
 		return Key{}, "", err
 	}

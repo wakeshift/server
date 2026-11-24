@@ -131,7 +131,7 @@ func TestBody(t *testing.T) {
 }
 
 func TestBackoff(t *testing.T) {
-	if Backoff(1) != BackoffBase || Backoff(2) != 2*BackoffBase || Backoff(100) != maxBackoff {
+	if Backoff(1) != BackoffBase() || Backoff(2) != 2*BackoffBase() || Backoff(100) != maxBackoff {
 		t.Fatal(Backoff(1), Backoff(2), Backoff(100))
 	}
 }

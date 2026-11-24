@@ -78,8 +78,7 @@ func TestHermesRecognizedWithoutTheModelsClaim(t *testing.T) {
 		}
 	}
 	// Where the app sees no client name and the model passed no harness
-	// (a stateless server, before the plugin is installed: wakebench's
-	// realistic tier, November 7, 2026), the MCP Python SDK 2.x's
+	// (a stateless server, before the plugin is installed), the MCP Python SDK 2.x's
 	// User-Agent names Hermes unsurely: the install offer for Hermes, its
 	// hedge, and the beacon, rather than "can't wake this agent".
 	sub, err := subscribe(app, caller{User: "h4", UserAgent: "python-httpx2/2.12.0"}, "ci/acme/web", subOpts{})
@@ -217,7 +216,7 @@ func TestHermesPlugin(t *testing.T) {
 	}
 }
 
-// One Hermes conversation watching two apps (docs/harnesses.md, Hermes): the
+// One Hermes conversation watching two apps: the
 // plugin keeps a link per app, so each app's messages wake it, and a second
 // app's beacon neither displaces the first nor is handed its link. Then the
 // first app is watched again from a call that didn't pass its session key
@@ -445,8 +444,8 @@ func TestHermesPluginWithoutAUser(t *testing.T) {
 	}
 }
 
-// A Hermes API server conversation keeps its link through its woken runs
-// (docs/harnesses.md, the restart table): two wakes in a row, a woken run
+// A Hermes API server conversation keeps its link through its woken runs:
+// two wakes in a row, a woken run
 // that calls watch again in the same session, one that starts a new
 // session (superseding the first), and a gateway restart, after which the
 // plugin listens again from the saved link and the next message wakes it

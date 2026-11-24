@@ -4,6 +4,7 @@ package server
 
 import (
 	"context"
+	"io"
 	"io/fs"
 	"log/slog"
 	"net/http"
@@ -36,6 +37,10 @@ type Server struct {
 	// docs for coding agents live: /llms.txt, /llms-full.txt and /AGENTS.md
 	// redirect there. Empty: they're 404s.
 	SiteURL string
+	// SupportEmail is the deployment's support address
+	// (WAKESHIFT_SUPPORT_EMAIL), the contact /.well-known/security.txt
+	// gives; empty: only the repository's security advisories.
+	SupportEmail string
 }
 
 // Registrar adds routes to the server's mux.
@@ -68,6 +73,7 @@ func (s *Server) Handler() http.Handler {
 	}
 	app := spa(s.Web)
 	mux.HandleFunc("GET /robots.txt", robots(s.SiteURL))
+	mux.HandleFunc("GET /.well-known/security.txt", securityTxt(s.SupportEmail))
 	mux.HandleFunc("/.well-known/", notFound)
 	mux.HandleFunc("/oauth/", notFound)
 	// Downloads and install scripts the routes above don't serve (Wakeshift
@@ -77,7 +83,57 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/install/", notFound)
 	mux.Handle("GET /oauth/authorize", app)
 	mux.Handle("/", discovery(s.SiteURL, app))
-	return securityHeaders(s.HSTS, logRequests(mux))
+	return bodyDeadline(securityHeaders(s.HSTS, logRequests(mux)))
+}
+
+// BodyReadTimeout is how long a request has to send its body, from when
+// its handler starts (the headers have ReadHeaderTimeout, cmd/wakeshift):
+// a client that trickles a body in a byte at a time is cut off rather than
+// holding a connection and a handler for good. Every body the server takes
+// is small. A variable so tests can shorten it.
+var BodyReadTimeout = 30 * time.Second
+
+// bodyDeadline gives a request with a body BodyReadTimeout to send it: the
+// connection's read deadline, cleared once the body has been read to its
+// end. Only then does the server read the connection again (to notice the
+// client going away, which cancels the request's context), so a handler
+// that reads its body and then holds the request open (a long poll, a
+// wait, an MCP push stream) isn't cut off, nor its context canceled, by
+// the deadline. A request without a body (a WebSocket upgrade, a GET poll)
+// gets no deadline. The server sets the connection's deadlines afresh for
+// its next request.
+func bodyDeadline(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Body == nil || r.Body == http.NoBody || BodyReadTimeout <= 0 {
+			next.ServeHTTP(w, r)
+			return
+		}
+		rc := http.NewResponseController(w)
+		if err := rc.SetReadDeadline(time.Now().Add(BodyReadTimeout)); err != nil {
+			next.ServeHTTP(w, r) // a writer without deadlines (a test's recorder)
+			return
+		}
+		r.Body = &deadlineBody{ReadCloser: r.Body, rc: rc}
+		next.ServeHTTP(w, r)
+	})
+}
+
+// deadlineBody clears the connection's read deadline once the body has
+// been read to its end (bodyDeadline). net/http clears it too as it starts
+// its background read there; this doesn't depend on that.
+type deadlineBody struct {
+	io.ReadCloser
+	rc      *http.ResponseController
+	cleared bool
+}
+
+func (b *deadlineBody) Read(p []byte) (int, error) {
+	n, err := b.ReadCloser.Read(p)
+	if err == io.EOF && !b.cleared {
+		b.cleared = true
+		b.rc.SetReadDeadline(time.Time{})
+	}
+	return n, err
 }
 
 func (s *Server) ready(w http.ResponseWriter, r *http.Request) {

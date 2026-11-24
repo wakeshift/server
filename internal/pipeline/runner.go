@@ -575,10 +575,9 @@ type Target struct {
 //
 // The others ask for the lock again every leaderRetry on the connection
 // they'll listen on, held meanwhile: a new connection for each ask cost a
-// Postgres backend, a TLS handshake through the Cloud SQL connector and a
-// SCRAM exchange every 3 seconds on every instance but one (production,
-// 2026-10-29: 600 connections every 30 minutes, nearly all under a second
-// long). The connection is idle between asks, never in a transaction.
+// Postgres backend, a TLS handshake and a SCRAM exchange every 3 seconds
+// on every instance but one, each connection under a second long. The
+// connection is idle between asks, never in a transaction.
 func (r *Runner) listen(ctx context.Context, q *queue, resync chan<- struct{}) {
 	for ctx.Err() == nil {
 		led := false

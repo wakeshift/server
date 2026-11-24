@@ -139,9 +139,11 @@ func TestGrokProofRefusals(t *testing.T) {
 		{"challenge": ch, "public_key": k.pem(), "signature": other.sign(grokBotID, ch)},
 		{"challenge": ch, "public_key": k.pem(), "signature": k.sign("9a8b7c6d-5e4f-4321-8abc-0123456789ab", ch)},
 	}
+	// None of them is shown the session's wait URL (the foreground
+	// command): a bad signature earns no more than the challenge did.
 	for i, form := range bad {
 		code, body := prove(t, c, form)
-		if code != 401 || (i < 2) != strings.Contains(body, "That signature didn't match") || !strings.Contains(body, harnesses.LinkStart) {
+		if code != 401 || (i < 2) != strings.Contains(body, "That signature didn't match") || strings.Contains(body, harnesses.LinkStart) || (i == 2 && body != gone) {
 			t.Fatalf("bad proof %d: %d %s", i, code, body)
 		}
 	}

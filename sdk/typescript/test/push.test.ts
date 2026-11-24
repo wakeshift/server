@@ -708,12 +708,12 @@ test("maxHeartbeatMs: the smaller of it and the client's suggestion is asked for
   }
 });
 
-test("2.x createMcpHandler with responseMode \"auto\", one client shared by a server per request (the bench toy app's shape): push listed and served", async () => {
+test("2.x createMcpHandler with responseMode \"auto\", one client shared by a server per request (a common app shape): push listed and served", async () => {
   const core = fakeCore({ stream: () => ({ frames: [{ type: "active", cursor: "c2.a.0.m", truncated: false, heartbeat_ms: 30000 }, { type: "close" }] }) });
   const { wake } = nextApp(core);
   const handler = v2server.createMcpHandler(
     () => {
-      const server = new v2server.McpServer({ name: "wakebench", version: "0.1.0" });
+      const server = new v2server.McpServer({ name: "toy", version: "0.1.0" });
       wake.attach(server, { identify: () => ({ user: "u1" }), builtinTools: { subscribe: false, list: false, unsubscribe: false, wait: false } });
       return server;
     },

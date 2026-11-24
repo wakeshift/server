@@ -1,8 +1,7 @@
 package appapi
 
-// Redeem by tool call ID, for Claude Code's plugin (docs/harnesses.md,
-// "Redeem by call"), behind API.RedeemByToolCall
-// (WAKESHIFT_REDEEM_BY_TOOL_CALL, off by default).
+// Redeem by tool call ID, for Claude Code's plugin, behind
+// API.RedeemByToolCall (WAKESHIFT_REDEEM_BY_TOOL_CALL, off by default).
 //
 // Claude Code tells an MCP server each call's ID (_meta
 // ["claudecode/toolUseId"]). Its synchronous PreToolUse hook gets the same

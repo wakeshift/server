@@ -9,7 +9,7 @@ import (
 
 // allowedLog are the log attributes that may leave the process, each
 // holding no credential, content or personal data once scrubbed
-// (an internal audit decides each). Everything else is dropped, including
+// (each is reviewed before it's added). Everything else is dropped, including
 // keys code adds later: request paths (stream links, publish URLs and
 // invite codes are credentials in URLs; "route" has the
 // pattern instead), user, agent, tenant and other row IDs, emails, client

@@ -7,7 +7,7 @@ import type { AddressInfo } from "node:net";
 import { test } from "node:test";
 import { CONNECTOR_CLIENT, rewriteRequest, rewriteResponse, startConnectorRoute } from "../src/connectorroute.js";
 
-test("a call states Anthropic's client and keeps only the protocol's _meta", () => {
+test("a call states the route's client and keeps only the protocol's _meta", () => {
   const call = {
     jsonrpc: "2.0",
     id: 3,

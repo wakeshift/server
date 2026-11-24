@@ -16,7 +16,7 @@ import (
 // A workspace whose only webhook has lapsed is still visited, and the
 // webhook removed. Before, a pass visited only workspaces with a live
 // webhook, so the last one to lapse stayed for good, and one that lapsed
-// mid-retry was counted as failing by the admin service ever after.
+// mid-retry was counted as failing ever after.
 func TestPassRemovesAWorkspacesLastExpiredWebhook(t *testing.T) {
 	ctx := context.Background()
 	d := dbtest.New(t)
@@ -27,8 +27,8 @@ func TestPassRemovesAWorkspacesLastExpiredWebhook(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	// Two workspaces, each with one webhook; one lapsed mid-retry, as the
-	// house agents' did after a deploy. The other is live.
+	// Two workspaces, each with one webhook; one lapsed mid-retry, as a
+	// webhook can across a deploy. The other is live.
 	lapsed, live := dbtest.NewTenant(t, d), dbtest.NewTenant(t, d)
 	for _, tenant := range []string{lapsed, live} {
 		err := d.InTenant(ctx, tenant, func(tx pgx.Tx) error {

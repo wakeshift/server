@@ -9,7 +9,7 @@
 //	   -sums SHA256SUMS]
 //
 // -sums is the release's SHA256SUMS (already checked against its Sigstore
-// signature: .github/workflows/agent-plugins.yml). It prints the plugins
+// signature by the release pipeline). It prints the plugins
 // whose files changed, one per line. The publishing pipeline runs it, and
 // the bench, for a marketplace on this machine.
 //

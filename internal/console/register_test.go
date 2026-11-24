@@ -53,14 +53,26 @@ type registered struct {
 
 func register(u *coretest.User, body map[string]string) (int, registered) {
 	var out registered
-	code := u.Do("POST", "/api/v1/developer/apps/register", body, &out)
+	code := u.Do("POST", "/api/v1/developer/apps/register", typed(body), &out)
 	return code, out
 }
 
 func registerKey(u *coretest.User, app string, body map[string]string) (int, registered) {
 	var out registered
-	code := u.Do("POST", "/api/v1/developer/apps/"+app+"/keys/register", body, &out)
+	code := u.Do("POST", "/api/v1/developer/apps/"+app+"/keys/register", typed(body), &out)
 	return code, out
+}
+
+// typed adds the key code the person types from their terminal, for the
+// body's public key, unless the body has a key_code already.
+func typed(body map[string]string) map[string]string {
+	if _, ok := body["key_code"]; ok {
+		return body
+	}
+	if pub, err := base64.RawURLEncoding.DecodeString(body["public_key"]); err == nil && len(pub) == ed25519.PublicKeySize {
+		body["key_code"] = appkey.KeyID(pub)[:8]
+	}
+	return body
 }
 
 // The confirm page creates an app whose only key is the one the CLI made:
@@ -80,7 +92,7 @@ func TestRegisterAppFromPublicKey(t *testing.T) {
 	}
 
 	var raw json.RawMessage
-	if code := ada.Do("POST", "/api/v1/developer/apps/register", map[string]string{"id": "acme-ci-dev", "name": "Acme CI", "public_key": k.link()}, &raw); code != 200 {
+	if code := ada.Do("POST", "/api/v1/developer/apps/register", map[string]string{"id": "acme-ci-dev", "name": "Acme CI", "public_key": k.link(), "key_code": k.code()}, &raw); code != 200 {
 		t.Fatalf("register: %d %s", code, raw)
 	}
 	if strings.Contains(string(raw), "wst_") || strings.Contains(string(raw), `"key"`) {
@@ -262,8 +274,9 @@ func TestRegisterRefusesBadAndUsedKeys(t *testing.T) {
 }
 
 // Adding a key from the CLI to an existing app: the key works at once
-// beside the others, its log entry says via cli, and only members whose
-// role manages keys may; anyone else gets 404, as for no such app.
+// beside the others, its log entry says via cli, and only owners and admins
+// may (TestLinkRegistrationGuards: a developer gets 403); a non-member gets
+// 404, as for no such app.
 func TestRegisterKeyForAnApp(t *testing.T) {
 	c := coretest.Start(t)
 	ctx := context.Background()
@@ -271,7 +284,7 @@ func TestRegisterKeyForAnApp(t *testing.T) {
 	cy := c.SignIn("cy@example.com")
 	eve := c.SignIn("eve@example.com")
 	org := orgOf(t, ada)
-	join(t, c, org, cy, "developer")
+	join(t, c, org, cy, "admin")
 	made := createApp(t, ada, "quizzer", "Quizzer", "")
 
 	k := newCLIKey(t)
@@ -284,10 +297,10 @@ func TestRegisterKeyForAnApp(t *testing.T) {
 	if code, out := register(eve, map[string]string{"org_id": org, "id": "eves-dev", "name": "Eve's", "public_key": k.link()}); code != 404 || out.Error.Code != "not_found" {
 		t.Fatalf("a non-member's app in the organization: %d %+v", code, out.Error)
 	}
-	// A developer manages keys (as making one in the console).
+	// An admin adds a link's key.
 	code, out := registerKey(cy, "quizzer", map[string]string{"public_key": k.link(), "name": "Cy's laptop"})
 	if code != 200 || out.KeyInfo.ID != k.code() || out.KeyInfo.Name != "Cy's laptop" {
-		t.Fatalf("a developer: %d %+v", code, out)
+		t.Fatalf("an admin: %d %+v", code, out)
 	}
 	if id, err := coretest.KeyClient(t, k.key, c.URL).AppID(ctx); err != nil || id != "quizzer" {
 		t.Fatalf("the added key: %q %v", id, err)

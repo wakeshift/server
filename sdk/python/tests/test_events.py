@@ -895,7 +895,7 @@ WEB_CAPS = {
 
 def test_chatgpt_desktop_by_its_capabilities() -> None:
     """ChatGPT's desktop app (Codex mode): its client name, with both the
-    skybridge mime type and openai/form (the probes of November 9-10, 2026);
+    skybridge mime type and openai/form (as observed);
     a Work chat on the web, the desktop app's regular chat and anything less
     are ChatGPT."""
     caps = "io.modelcontextprotocol/clientCapabilities"

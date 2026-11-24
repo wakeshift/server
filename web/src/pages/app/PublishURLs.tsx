@@ -176,7 +176,7 @@ function Body({ app }: { app: OwnedApp }) {
           )}
           <div className="mt-2">
             <Hint>
-              Your app can make them too, with <code>event.publishUrl(args)</code>. See{' '}
+              Your app can make them too, with <code>event.createPublishUrl(args)</code>. See{' '}
               <a className={linkClass} href={`${site.docs}/publish-urls`}>
                 publish URLs
               </a>{' '}

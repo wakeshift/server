@@ -63,8 +63,8 @@ func TestPreapproveTools(t *testing.T) {
 	}
 }
 
-// Turning OthersCanWake on or off is in the app's log, as Groups is: it
-// changes what the consent screen tells people.
+// Turning OthersCanWake on or off is in the app's log: it changes what the
+// consent screen tells people.
 func TestManifestChangesOthersCanWake(t *testing.T) {
 	if got := manifestChanges(Manifest{}, Manifest{OthersCanWake: true}); len(got) != 1 || got[0] != "others can wake: false -> true" {
 		t.Fatalf("on: %q", got)

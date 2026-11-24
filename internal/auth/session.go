@@ -13,8 +13,9 @@
 // cookie is SameSite=Strict, and unsafe methods also need a matching Origin
 // header, which browsers send on every cross-site request.
 //
-// There is no bearer token for the console API: the device tokens Wakeshift
-// for Mac used are gone, and an Authorization header signs nobody in.
+// There is no bearer token for the console API: the device tokens an
+// earlier desktop app used are gone, and an Authorization header signs
+// nobody in.
 package auth
 
 import (
@@ -261,6 +262,7 @@ func (c *Console) signOut(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	c.clear(w, sessionCookie, "/")
+	c.clearLegacySession(w)
 	httpx.WriteJSON(w, http.StatusOK, map[string]bool{"authenticated": false})
 }
 
@@ -280,22 +282,68 @@ func (c *Console) signedIn(w http.ResponseWriter, r *http.Request, u accounts.Us
 
 func (c *Console) issue(w http.ResponseWriter, u accounts.User, tenantID string) {
 	exp := c.now().Add(sessionTTL)
-	http.SetCookie(w, c.cookie(sessionCookie, "/", c.sign("session", claims{User: u.ID, Tenant: tenantID, Epoch: u.SessionEpoch, Exp: exp.Unix()}), exp, http.SameSiteStrictMode))
+	http.SetCookie(w, c.cookie(sessionCookie, "/", c.sign(c.sessionPurpose(), claims{User: u.ID, Tenant: tenantID, Epoch: u.SessionEpoch, Exp: exp.Unix()}), exp, http.SameSiteStrictMode))
+	c.clearLegacySession(w)
 }
 
 func (c *Console) read(r *http.Request) (claims, bool) {
 	var cl claims
-	ck, err := r.Cookie(sessionCookie)
-	if err != nil || !c.verify("session", ck.Value, &cl) || cl.User == "" || cl.Tenant == "" || c.now().Unix() > cl.Exp {
+	ck, err := r.Cookie(c.cookieName(sessionCookie))
+	if err != nil || !c.verify(c.sessionPurpose(), ck.Value, &cl) || cl.User == "" || cl.Tenant == "" || c.now().Unix() > cl.Exp {
 		return claims{}, false
 	}
 	return cl, true
 }
 
+// Cookies on https are named __Host-<name>, with Secure, Path=/ and no
+// Domain, so no other host (a sibling subdomain, say) can set or overwrite
+// one: a planted session would sign the person in as someone else.
+// Browsers take the prefix only on Secure cookies, so a plain-http
+// localhost server keeps the bare names and their paths.
+const hostPrefix = "__Host-"
+
+// secure says whether the console is served over https.
+func (c *Console) secure() bool { return strings.HasPrefix(c.PublicURL, "https://") }
+
+// cookieName is a cookie's name as set and read: __Host-<name> on https.
+func (c *Console) cookieName(name string) string {
+	if c.secure() {
+		return hostPrefix + name
+	}
+	return name
+}
+
+// The session cookie's signing purpose. On https it differs from the one
+// sessions were signed with before the prefix (legacySessionPurpose), and
+// only the prefixed name is read: an unprefixed session, which another
+// host could plant, never signs anyone in. Sessions from before the prefix
+// stop working (a one-time sign-out; they lasted sessionTTL anyway).
+const legacySessionPurpose = "session"
+
+func (c *Console) sessionPurpose() string {
+	if c.secure() {
+		return "session-host"
+	}
+	return legacySessionPurpose
+}
+
+// clearLegacySession expires an unprefixed session cookie from before the
+// prefix, on https.
+func (c *Console) clearLegacySession(w http.ResponseWriter) {
+	if c.secure() {
+		http.SetCookie(w, &http.Cookie{Name: sessionCookie, Value: "", Path: "/", Expires: time.Unix(0, 0), HttpOnly: true, SameSite: http.SameSiteStrictMode, Secure: true})
+	}
+}
+
+// cookie is a console cookie: named and scoped as cookieName says (on
+// https, Path=/ whatever path is), HttpOnly, and Secure on https.
 func (c *Console) cookie(name, path, value string, exp time.Time, sameSite http.SameSite) *http.Cookie {
+	if c.secure() {
+		path = "/"
+	}
 	return &http.Cookie{
-		Name: name, Value: value, Path: path, Expires: exp,
-		HttpOnly: true, SameSite: sameSite, Secure: strings.HasPrefix(c.PublicURL, "https://"),
+		Name: c.cookieName(name), Value: value, Path: path, Expires: exp,
+		HttpOnly: true, SameSite: sameSite, Secure: c.secure(),
 	}
 }
 

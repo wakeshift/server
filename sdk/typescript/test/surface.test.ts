@@ -54,7 +54,7 @@ const TYPES = [
   // Advanced (the "apps that act for their users' agents" page).
   "Manifest",
   "AgentScope",
-  // Beyond §5: the types those name, which a caller needs to write them out.
+  // Beyond the designed list: the types those name, which a caller needs to write them out.
   "LogFields",
   // Round 3: every type a public signature names (attach's server, registerTool's handler, call.subscribe).
   "RegisterToolHandler",

@@ -26,6 +26,7 @@ import (
 	"github.com/wakeshift/server/internal/grants"
 	"github.com/wakeshift/server/internal/harnesses"
 	"github.com/wakeshift/server/internal/httpx"
+	"github.com/wakeshift/server/internal/orgs"
 	"github.com/wakeshift/server/internal/pipeline"
 	"github.com/wakeshift/server/internal/pluginmark"
 	"github.com/wakeshift/server/internal/sessions"
@@ -1517,6 +1518,13 @@ func (a *API) forgetUser(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	app := AppFrom(r.Context())
+	// Owners and admins only, as in the console: a key a developer made
+	// can't (orgs.AppForgetUser).
+	if !app.KeyMay(orgs.AppForgetUser) {
+		httpx.WriteError(w, http.StatusForbidden, "forbidden",
+			"forgetting a user takes a key that an owner or admin of the app's organization made; make one in the console")
+		return
+	}
 	forgotten, err := a.ForgetUser(r.Context(), app.ID, in.User, "app:"+app.ID)
 	a.respond(w, map[string]bool{"forgotten": forgotten}, err)
 }
@@ -1532,16 +1540,11 @@ func eraseWorkspace(ctx context.Context, tx pgx.Tx) error {
 	if _, err := tx.Exec(ctx, `UPDATE subscription_cursors SET updated_at = now()`); err != nil {
 		return err
 	}
-	// The audit log is append-only, except for a workspace being erased
-	// (030_forget_users.sql).
-	if _, err := tx.Exec(ctx, `SELECT set_config('app.erasing_tenant', current_tenant()::text, true)`); err != nil {
-		return err
-	}
 	for _, table := range []string{
 		"connector_tickets", "session_setups", "client_requests", "pending_additions", "deliveries", "subscription_cursors", "event_subscriptions", "topic_subscriptions", "subscriptions",
 		"stream_leases", "stream_links", "oauth_codes", "oauth_refresh_tokens", "grant_paces", "grants", "mcp_event_webhooks", "agent_webhooks",
 		"agent_webhook_setups", "bot_challenges", "bot_keys", "sessions",
-		"events", "event_counters", "audit_log", "devices", "agents",
+		"events", "event_counters", "devices", "agents",
 		// Platform-level tables that name the workspace, its daily usage
 		// counts included (deliveries.RollUpUsage holds the workspace's row
 		// while it writes them, so none land after this).
@@ -1554,10 +1557,11 @@ func eraseWorkspace(ctx context.Context, tx pgx.Tx) error {
 			return fmt.Errorf("erasing %s: %w", table, err)
 		}
 	}
-	if _, err := tx.Exec(ctx, `SELECT set_config('app.erasing_tenant', '', true)`); err != nil {
-		return err
-	}
-	_, err := tx.Exec(ctx, `DELETE FROM tenants WHERE id = current_tenant()`)
+	// Then the audit log, which is append-only and which the server's role
+	// can't delete from, and the workspace itself, together: erase_tenant
+	// (170_erase_tenant.sql) does both as the tables' owner, and only for a
+	// workspace nothing else is left of.
+	_, err := tx.Exec(ctx, `SELECT erase_tenant()`)
 	return err
 }
 

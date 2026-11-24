@@ -66,6 +66,16 @@ func fakeCodex(dir string) {
 		case "initialize":
 			send(map[string]any{"id": *m.ID, "result": map[string]any{}})
 		case "thread/resume":
+			// While dir/refuse-approval counts down from N, the request's
+			// approvalPolicy is refused, as a Codex that dropped it would.
+			refuse := filepath.Join(dir, "refuse-approval")
+			if b, err := os.ReadFile(refuse); err == nil {
+				if n, _ := strconv.Atoi(strings.TrimSpace(string(b))); n > 0 {
+					os.WriteFile(refuse, []byte(strconv.Itoa(n-1)), 0o600)
+					send(map[string]any{"id": *m.ID, "error": map[string]any{"code": -32600, "message": "Invalid request: unknown variant `untrusted`, expected one of `on-request`, `never`"}})
+					continue
+				}
+			}
 			busy := filepath.Join(dir, "busy")
 			if b, err := os.ReadFile(busy); err == nil {
 				if n, _ := strconv.Atoi(strings.TrimSpace(string(b))); n > 0 {
@@ -401,9 +411,10 @@ func TestDesktopWindowStartsTheTurn(t *testing.T) {
 }
 
 // No window has the thread: Codex's app-server runs it in the background,
-// read-only and never asking (whatever config.toml says; the thread itself
-// ran with full access), the events as a tool output, an approval request
-// declined; the events are acknowledged once the turn completed.
+// read-only and asking before anything but known-safe commands (whatever
+// config.toml says; the thread itself ran with full access and approvals
+// off), the events as a tool output, an approval request declined; the
+// events are acknowledged once the turn completed.
 func TestDesktopBackgroundTurn(t *testing.T) {
 	rollout := desktopRollout(t, desktopOriginator)
 	f := &fakeDesktop{t: t, rollout: rollout}
@@ -414,7 +425,7 @@ func TestDesktopBackgroundTurn(t *testing.T) {
 	stop()
 	<-done
 	args, _ := os.ReadFile(filepath.Join(dir, "args"))
-	if string(args) != strings.Join([]string{"-c", `sandbox_mode="read-only"`, "-c", `approval_policy="never"`, "app-server", "--listen", "stdio://"}, "\n") {
+	if string(args) != strings.Join([]string{"-c", `sandbox_mode="read-only"`, "-c", `approval_policy="on-request"`, "app-server", "--listen", "stdio://"}, "\n") {
 		t.Fatalf("args %q", args)
 	}
 	var resume, turn map[string]any
@@ -422,12 +433,12 @@ func TestDesktopBackgroundTurn(t *testing.T) {
 	json.Unmarshal(b, &resume)
 	b, _ = os.ReadFile(filepath.Join(dir, "turn.json"))
 	json.Unmarshal(b, &turn)
-	if resume["threadId"] != thread || resume["sandbox"] != "read-only" || resume["approvalPolicy"] != "never" {
+	if resume["threadId"] != thread || resume["sandbox"] != "read-only" || resume["approvalPolicy"] != "untrusted" {
 		t.Fatalf("thread/resume %v", resume)
 	}
 	out, _ := turn["toolOutput"].(map[string]any)
 	if turn["threadId"] != thread || len(turn["input"].([]any)) != 0 || out["name"] != "wakeshift_event" || !strings.Contains(fmt.Sprint(out["output"]), "hi 0") ||
-		turn["approvalPolicy"] != "never" || fmt.Sprint(turn["sandboxPolicy"]) != "map[type:readOnly]" {
+		turn["approvalPolicy"] != "untrusted" || fmt.Sprint(turn["sandboxPolicy"]) != "map[type:readOnly]" {
 		t.Fatalf("turn/start %v", turn)
 	}
 	if b, err := os.ReadFile(filepath.Join(dir, "declined")); err != nil || !bytes.Contains(b, []byte("-32601")) {
@@ -469,8 +480,39 @@ func TestBackgroundPermissions(t *testing.T) {
 	stop()
 	<-done
 	args, _ := os.ReadFile(filepath.Join(fdir, "args"))
-	if !strings.Contains(string(args), `sandbox_mode="workspace-write"`) {
+	if !strings.Contains(string(args), `sandbox_mode="workspace-write"`) || !strings.Contains(string(args), `approval_policy="on-request"`) {
 		t.Fatalf("args %q", args)
+	}
+}
+
+// The thread's own permissions widen the sandbox, never the approvals: the
+// thread ran with full access and approvals off, and a background turn
+// still asks (and so fails closed) before anything but known-safe
+// commands.
+func TestBackgroundTurnNeverTurnsApprovalsOff(t *testing.T) {
+	rollout := desktopRollout(t, desktopOriginator)
+	bg, dir := fakeCodexTurn(t, rollout)
+	acks := make(chan string, 1)
+	cfg := desktopConfig(t, pacedStream(t, 1, nil, acks), filepath.Join(t.TempDir(), "ipc.sock"), rollout, bg)
+	cfg.Desktop.Permissions = PermissionsThread
+	stop, done := runFor(cfg)
+	waitAck(t, acks, "d0")
+	stop()
+	<-done
+	args, _ := os.ReadFile(filepath.Join(dir, "args"))
+	if string(args) != strings.Join([]string{"-c", `sandbox_mode="danger-full-access"`, "-c", `approval_policy="on-request"`, "app-server", "--listen", "stdio://"}, "\n") {
+		t.Fatalf("args %q", args)
+	}
+	var resume, turn map[string]any
+	b, _ := os.ReadFile(filepath.Join(dir, "resume.json"))
+	json.Unmarshal(b, &resume)
+	b, _ = os.ReadFile(filepath.Join(dir, "turn.json"))
+	json.Unmarshal(b, &turn)
+	if resume["approvalPolicy"] != "untrusted" || turn["approvalPolicy"] != "untrusted" {
+		t.Fatalf("thread/resume %v; turn/start %v", resume, turn)
+	}
+	if b, err := os.ReadFile(filepath.Join(dir, "declined")); err != nil || !bytes.Contains(b, []byte("-32601")) {
+		t.Fatalf("the approval request wasn't declined: %q %v", b, err)
 	}
 }
 
@@ -510,6 +552,56 @@ func TestDesktopWaitsWhileTheThreadIsHeld(t *testing.T) {
 	if _, err := os.Stat(filepath.Join(dir, "turn.json")); err != nil {
 		t.Fatal("no turn once the thread was free")
 	}
+}
+
+// A Codex that refuses the background turn's approval policy in its
+// requests (a version that dropped "untrusted"): the turn fails rather than
+// run with a looser policy, its events stay unacknowledged and are tried
+// again with backoff, past GiveUpAfter (the connector doesn't give up on
+// the thread), with a warning in the log saying why; once Codex takes it,
+// they're delivered.
+func TestDesktopBackgroundApprovalRefusedKeepsTheEvents(t *testing.T) {
+	rollout := desktopRollout(t, desktopOriginator)
+	f := &fakeDesktop{t: t, rollout: rollout}
+	bg, dir := fakeCodexTurn(t, rollout)
+	os.WriteFile(filepath.Join(dir, "refuse-approval"), []byte("4"), 0o600)
+	acks := make(chan string, 4)
+	var logs syncBuffer
+	cfg := desktopConfig(t, pacedStream(t, 1, nil, acks), f.serve(), rollout, bg)
+	cfg.Log = slog.New(slog.NewTextHandler(&logs, nil))
+	cfg.Desktop.GiveUpAfter = 10 * time.Millisecond
+	stop, done := runFor(cfg)
+	waitAck(t, acks, "d0")
+	stop()
+	<-done
+	if b, _ := os.ReadFile(filepath.Join(dir, "refuse-approval")); string(b) != "0" {
+		t.Fatalf("refusals left %q", b)
+	}
+	got := logs.String()
+	if strings.Count(got, "refused the approval policy Wakeshift runs background turns with") != 4 || !strings.Contains(got, "policy=untrusted") {
+		t.Fatalf("log:\n%s", got)
+	}
+	if strings.Contains(got, "giving up") {
+		t.Fatalf("gave up:\n%s", got)
+	}
+}
+
+// syncBuffer is a bytes.Buffer safe to write from several goroutines.
+type syncBuffer struct {
+	mu sync.Mutex
+	b  bytes.Buffer
+}
+
+func (s *syncBuffer) Write(p []byte) (int, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.b.Write(p)
+}
+
+func (s *syncBuffer) String() string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.b.String()
 }
 
 // A thread that stays out of reach: after GiveUpAfter the connector stops,

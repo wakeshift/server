@@ -44,8 +44,7 @@ func WorkspacesPerHour(app App) int {
 
 // DefaultEmitRecipientsPerMinute is how many recipients an app's
 // multi-recipient emits may name in a minute, all together, unless we've
-// set its override (apps.emit_recipients_per_minute: Agent Chat and the
-// games start at 60,000). A single-user emit isn't counted. A variable so
+// set its override (apps.emit_recipients_per_minute). A single-user emit isn't counted. A variable so
 // tests can lower it.
 var DefaultEmitRecipientsPerMinute = 10_000
 

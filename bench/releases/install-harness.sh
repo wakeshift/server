@@ -19,8 +19,8 @@
 #
 # macOS on Apple silicon (the bench's machines). Downloads are checked where
 # the vendor publishes a check: npm's integrity (npm pack), Codex's
-# SHA256SUMS. Cursor publishes none; its download is the one its own
-# installer makes, over HTTPS. Already there: prints the path and does nothing.
+# SHA256SUMS. Cursor's is the package its own installer downloads, over
+# HTTPS, which has no published checksum. Already there: prints the path and does nothing.
 set -eu
 
 harness=${1:?harness (claude-code, codex, cursor, opencode, pi, claude-agent-sdk)}
@@ -70,6 +70,7 @@ case "$harness" in
     tar -xzf "$tmp/$asset" -C "$tmp/out"
     ;;
   cursor)
+    # The same package, for this version, that Cursor's installer downloads.
     mkdir "$tmp/out"
     curl -fsSL "https://downloads.cursor.com/lab/$version/darwin/arm64/agent-cli-package.tar.gz" | tar --strip-components=1 -xzf - -C "$tmp/out"
     ;;

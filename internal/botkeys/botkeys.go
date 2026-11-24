@@ -110,8 +110,20 @@ func Parse(s string) (Challenge, error) {
 }
 
 // Message is the text a proof signs: "wakeshift-proof\n<bot>\n<challenge>".
-func Message(bot, challenge string) []byte {
-	return []byte("wakeshift-proof\n" + bot + "\n" + challenge)
+func Message(bot, challenge string) []byte { return harnesses.GrokProofMessage(bot, challenge) }
+
+// RegisterMessage is what a register proof signs when the connector was
+// shown the challenge's workspace and app (v2): "wakeshift-proof-v2\n<bot>
+// \n<challenge>\n<workspace id>\n<app id>". The bot's signature then says
+// which workspace and app it proved its key to, as the connector showed
+// them, and Wakeshift checks them against the challenge's own.
+func RegisterMessage(bot, challenge, tenant, app string) []byte {
+	return harnesses.GrokRegisterMessage(bot, challenge, tenant, app)
+}
+
+// VerifyRegister checks sig, by pub, over RegisterMessage.
+func VerifyRegister(pub ed25519.PublicKey, bot, challenge, tenant, app string, sig []byte) bool {
+	return len(pub) == ed25519.PublicKeySize && len(sig) == ed25519.SignatureSize && ed25519.Verify(pub, RegisterMessage(bot, challenge, tenant, app), sig)
 }
 
 // BotIDOK reports whether a bot ID can go into the signed text and the
@@ -132,6 +144,13 @@ func (c *Codec) Nonce(purpose, tenant, id string) []byte {
 	m := hmac.New(sha256.New, c.key)
 	m.Write([]byte("bot-proof:" + purpose + ":" + tenant + ":" + id))
 	return m.Sum(nil)[:16]
+}
+
+// Authentic reports whether ch's nonce is the one this codec derives for
+// what it names: a challenge Wakeshift made, checked without the database,
+// so a made-up one costs no lookup.
+func (c *Codec) Authentic(ch Challenge) bool {
+	return subtle.ConstantTimeCompare(c.Nonce(ch.Purpose, ch.Tenant, ch.ID), ch.Nonce) == 1
 }
 
 // Challenge is the challenge for a row.
@@ -201,9 +220,7 @@ func Verify(pub ed25519.PublicKey, bot, challenge string, sig []byte) bool {
 // challenge: "wakeshift-fetch\n<bot>\n<unix seconds>". Only the key the
 // setup was minted for can fetch it, so knowing a bot's ID (as every app
 // it uses does) isn't enough to read, and so use up, its setup check.
-func FetchMessage(bot, ts string) []byte {
-	return []byte("wakeshift-fetch\n" + bot + "\n" + ts)
-}
+func FetchMessage(bot, ts string) []byte { return harnesses.GrokFetchMessage(bot, ts) }
 
 // FetchSkew is how far a fetch's time may be from Wakeshift's.
 const FetchSkew = 5 * time.Minute

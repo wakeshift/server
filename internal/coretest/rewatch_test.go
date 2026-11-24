@@ -9,7 +9,7 @@ import (
 	"github.com/wakeshift/server/internal/harnesses"
 )
 
-// Unsubscribing and subscribing again (wakebench S7 and S9): the
+// Unsubscribing and subscribing again: the
 // conversation keeps one session only if it passes its session key again.
 // For Claude Code nothing else names the conversation (its MCP calls carry
 // no conversation ID, and a stateless 2026-07-28 server has no MCP

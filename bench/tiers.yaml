@@ -12,8 +12,9 @@
 # bar. Times are milliseconds.
 
 tiers:
+  # Tier 1: every scenario's bars, with the tightest times.
   T1:
-    label: "Tier 1: must be excellent"
+    label: "Tier 1"
     # claude-code-sdk: Claude Code through the Agent SDK, as T3 Code runs it (drivers/claude-code/sdk.ts), Claude Code's tier.
     harnesses: [claude-code, claude-code-sdk, codex]
     bars: &tier1
@@ -122,8 +123,9 @@ tiers:
       claude-code-sdk:
         S2: { p50_ms_max: 6500 }
 
+  # Tier 2: the same scenarios, with looser times and one nudge allowed.
   T2:
-    label: "Tier 2: supported"
+    label: "Tier 2"
     # hermes-api: Hermes through its API server (drivers/hermes/api.ts), Hermes's tier.
     harnesses: [claude-cowork, cursor, cursor-ide, opencode, hermes, hermes-api, pi]
     bars:
@@ -151,8 +153,9 @@ tiers:
       R8: { presented: true, told_ms_max: 30000, polled_instead: false }
       R9: { presented: true, told_ms_max: 30000, polled_instead: false }
 
+  # Tier 3: graded on works, plus a few bars for particular harnesses.
   T3:
-    label: "Tier 3: best effort"
+    label: "Tier 3"
     harnesses: [antigravity, grok-bot, chatgpt, openclaw, openclaw-codex, copilot]
     bars: {}
     harness_bars:
@@ -166,9 +169,9 @@ tiers:
       openclaw-codex:
         S6: { connected: true, needed_watch_again: false }
 
-  # Agents Wakeshift doesn't recognize (drivers/generic). Since November 5,
-  # 2026 they get only the neutral "can't wake" note (S1 checks it), and a
-  # message waits for the conversation, held (S5): no wake bars.
+  # Agents Wakeshift doesn't recognize (drivers/generic). They get only the
+  # neutral "can't wake" note (S1 checks it), and a message waits for the
+  # conversation, held (S5): no wake bars.
   generic:
     label: "Unrecognized agents (generic wake)"
     harnesses: [generic, generic-plain]

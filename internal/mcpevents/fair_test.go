@@ -197,18 +197,121 @@ func TestShares(t *testing.T) {
 		t.Fatalf("handed back %v", again)
 	}
 
-	// Every slot taken, by apps within their shares: the next waits for any.
+	// Busy apps take every slot but the last reserveSlots; apps sending to
+	// fewer than lightSends webhooks take those.
 	s = newShares()
-	for i := range sendSlots {
-		if !s.take(fmt.Sprintf("t%d", i), fmt.Sprintf("app%d", i/appSends), w("x")) {
+	n := 0
+	takeAs := func(app string) bool { n++; return s.take(fmt.Sprintf("t%d", n), app, w(fmt.Sprintf("t%d", n))) }
+	for i := range sendSlots - reserveSlots {
+		if !takeAs(fmt.Sprintf("busy%d", i/appSends)) {
 			t.Fatalf("slot %d refused", i)
+		}
+	}
+	if s.take("tb", "busy0", w("tb")) || s.take("tb9", "busy9", w("tb9")) && s.take("tb9", "busy9", w("tb9")) && s.take("tb9", "busy9", w("tb9")) {
+		t.Fatal("a busy app took a reserved slot")
+	}
+	s.give("tb9", "busy9")
+	s.give("tb9", "busy9")         // busy9's two, given back
+	s.settle(w("tb9"), time.Now()) // and its claim settled
+	for i := range reserveSlots {
+		if !takeAs(fmt.Sprintf("light%d", i/lightSends)) {
+			t.Fatalf("reserved slot %d refused", i)
 		}
 	}
 	if s.take("new", "new", w("new")) {
 		t.Fatal("more than sendSlots")
 	}
-	if got := s.give("t0", "app0"); len(got) != 1 || got[0].tenant != "new" {
-		t.Fatalf("handed back %v", got)
+	// A busy app's slot given back goes to the app that has none, not
+	// back to the busy app.
+	if got := s.give("t1", "busy0"); len(got) == 0 || got[0].tenant != "new" {
+		t.Fatalf("handed back %v, want new's first", got)
+	}
+	if s.take("t1", "busy0", w("t1")) {
+		t.Fatal("the busy app took back the slot it gave")
+	}
+	if !s.take("new", "new", w("new")) {
+		t.Fatal("the waiting app found no slot")
+	}
+}
+
+// Wakes waiting for any slot are handed back the apps holding fewest
+// first, each app's in the order they began waiting; a wait lasts until its
+// app gets a slot, or a claim for its wake settles it. While an app holding
+// fewer waits, an app takes no more.
+func TestSharesOrderAndSettle(t *testing.T) {
+	s := newShares()
+	w := func(tenant string) wake { return wake{tenant: tenant, agent: "a"} }
+	for i := range sendSlots {
+		if !s.take(fmt.Sprintf("f%d", i), fmt.Sprintf("app%d", i), w("x")) {
+			t.Fatalf("slot %d refused", i)
+		}
+	}
+	// Waiting: b (holding none) twice, then app0 (holding one), then c.
+	for _, x := range []struct{ tenant, app string }{{"b1", "b"}, {"z", "app0"}, {"b2", "b"}, {"c1", "c"}} {
+		if s.take(x.tenant, x.app, w(x.tenant)) {
+			t.Fatal("took a slot past sendSlots")
+		}
+	}
+	got := s.give("f5", "app5")
+	var order []string
+	for _, g := range got {
+		order = append(order, g.tenant)
+	}
+	if fmt.Sprint(order) != "[b1 b2 c1 z]" {
+		t.Fatalf("handed back %v, want [b1 b2 c1 z]", order)
+	}
+	// They still wait: given back again until they get a slot or settle.
+	if !s.take("b1", "b", w("b1")) {
+		t.Fatal("b found no slot")
+	}
+	s.settle(w("c1"), time.Now())
+	if got := s.give("f6", "app6"); len(got) != 2 {
+		t.Fatalf("handed back %v, want b2 and z", got)
+	}
+
+	// While an app holding none waits, one holding a slot takes no other:
+	// the slot that frees is the waiting app's.
+	s = newShares()
+	for i := range sendSlots - 1 {
+		s.take(fmt.Sprintf("x%d", i), fmt.Sprintf("x%d", i), w("x"))
+	}
+	if !s.take("one", "one", w("one")) || s.take("zero", "zero", w("zero")) {
+		t.Fatal("slots miscounted")
+	}
+	s.give("x0", "x0")
+	if s.take("one", "one", w("one")) {
+		t.Fatal("an app took a second slot while one holding none waited")
+	}
+	if !s.take("zero", "zero", w("zero")) {
+		t.Fatal("the waiting app found no slot")
+	}
+	s.give("x1", "x1")
+	if !s.take("one", "one", w("one")) {
+		t.Fatal("no one waits now, and the app found no slot")
+	}
+}
+
+// An app whose sends keep taking slowSend or longer takes at most
+// slowAppSends; once they're fast again, its full share.
+func TestSharesSlowApp(t *testing.T) {
+	s := newShares()
+	w := wake{tenant: "t", agent: "a"}
+	for range 3 {
+		s.observe("slow", 8*time.Second)
+	}
+	for i := range slowAppSends {
+		if !s.take(fmt.Sprintf("t%d", i), "slow", w) {
+			t.Fatalf("slot %d refused", i)
+		}
+	}
+	if s.take("tx", "slow", w) {
+		t.Fatal("a slow app took more than slowAppSends")
+	}
+	for range 20 {
+		s.observe("slow", 10*time.Millisecond)
+	}
+	if !s.take("tx", "slow", w) {
+		t.Fatal("an app fast again is held to slowAppSends")
 	}
 }
 
@@ -220,8 +323,8 @@ func TestShares(t *testing.T) {
 func TestSlowAppDoesntHoldUpAnother(t *testing.T) {
 	ctx := context.Background()
 	d := dbtest.New(t)
-	AllowLoopback = true
-	t.Cleanup(func() { AllowLoopback = false })
+	SetAllowLoopback(true)
+	t.Cleanup(func() { SetAllowLoopback(false) })
 
 	var (
 		mu       sync.Mutex
@@ -355,5 +458,47 @@ func waitFor(t *testing.T, what string, ok func() bool) {
 			t.Fatalf("timed out waiting for %s", what)
 		}
 		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+// The apps one account made take at most ownerSends between them; another
+// account's app, and an app no account made, aren't held to it.
+func TestSharesPerOwner(t *testing.T) {
+	s := newShares()
+	owners := map[string]string{"a1": "acct", "a2": "acct"}
+	n := 0
+	take := func(app string) bool {
+		n++
+		return s.takeAs(fmt.Sprintf("t%d", n), app, owners[app], wake{tenant: fmt.Sprintf("t%d", n), agent: "a"})
+	}
+	for i := range ownerSends {
+		if !take([]string{"a1", "a2"}[i%2]) {
+			t.Fatalf("the account's slot %d refused", i)
+		}
+	}
+	if take("a1") || take("a2") {
+		t.Fatal("an account's apps took more than ownerSends")
+	}
+	if !take("other") {
+		t.Fatal("another app found no slot")
+	}
+	if got := s.giveAs("t1", "a1", "acct"); len(got) != 2 {
+		t.Fatalf("handed back %v, want the account's two", got)
+	}
+	if !take("a2") {
+		t.Fatal("the account's apps found no slot once one was given back")
+	}
+
+	// A slot is given back under the owner it was taken under, so an
+	// owner read differently later (an app moved to another account)
+	// leaves no count behind.
+	s = newShares()
+	if !s.takeAs("t", "moved", "old", wake{tenant: "t", agent: "a"}) || !s.takeAs("t", "moved", "new", wake{tenant: "t", agent: "a"}) {
+		t.Fatal("slots refused")
+	}
+	s.giveAs("t", "moved", "old")
+	s.giveAs("t", "moved", "new")
+	if s.all != 0 || len(s.byKey) != 0 {
+		t.Fatalf("counts left behind: %d %v", s.all, s.byKey)
 	}
 }

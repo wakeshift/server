@@ -1,0 +1,49 @@
+# Dependency updates: the workflows' pinned actions, the Dockerfile's and
+# docker-compose.yml's pinned images, the Go module, the console's, the
+# TypeScript SDK's and the harness runner's npm packages, and the Python
+# SDK's (uv.lock). Weekly, grouped per ecosystem, so each is one pull
+# request; CI and the vulnerability checks run on each.
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    groups:
+      actions:
+        patterns: ['*']
+  - package-ecosystem: docker
+    directory: /
+    schedule:
+      interval: weekly
+    groups:
+      images:
+        patterns: ['*']
+  - package-ecosystem: docker-compose
+    directory: /
+    schedule:
+      interval: weekly
+    groups:
+      compose:
+        patterns: ['*']
+  - package-ecosystem: gomod
+    directory: /
+    schedule:
+      interval: weekly
+    groups:
+      go:
+        patterns: ['*']
+  - package-ecosystem: npm
+    directories: [/web, /sdk/typescript, /bench]
+    schedule:
+      interval: weekly
+    groups:
+      npm:
+        patterns: ['*']
+  - package-ecosystem: uv
+    directory: /sdk/python
+    schedule:
+      interval: weekly
+    groups:
+      python:
+        patterns: ['*']

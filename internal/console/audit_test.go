@@ -45,7 +45,8 @@ func TestConsoleActionsAreAudited(t *testing.T) {
 	var sub struct{ ID string }
 	ada.Do("POST", "/api/v1/subscriptions", map[string]any{"agent_id": "claude-code", "event_type": "test.ping"}, &sub)
 	ada.Do("POST", "/api/v1/subscriptions/"+sub.ID+"/cancel", nil, nil)
-	ada.Do("POST", "/api/v1/agents/claude-code/stream-link", map[string]bool{}, nil)
+	var minted struct{ URL string }
+	ada.Do("POST", "/api/v1/agents/claude-code/stream-link", map[string]bool{}, &minted)
 	ada.Do("POST", "/api/v1/agents/claude-code/stream-links/revoke", nil, nil)
 	var listed struct {
 		Apps []struct {
@@ -70,6 +71,7 @@ func TestConsoleActionsAreAudited(t *testing.T) {
 	want := []string{
 		"grant.revoked " + user + " agentchat/claude-code",
 		"stream_links.revoked " + user + " /claude-code",
+		"stream_link.created " + user + " /claude-code",
 		"subscription.canceled " + user + " /claude-code",
 		"subscription.created " + user + " /claude-code",
 	}
@@ -82,6 +84,20 @@ func TestConsoleActionsAreAudited(t *testing.T) {
 	if page.Entries[0].Detail["subscriptions_canceled"] != float64(0) || page.Entries[1].Detail["revoked"] != float64(1) {
 		t.Fatalf("revocations say what they undid: %v %v", page.Entries[0].Detail, page.Entries[1].Detail)
 	}
+	// Minting a link names it by its ID, with its expiry, never its URL.
+	made := page.Entries[2].Detail
+	if minted.URL == "" || made["link"] == nil || made["link"] == "" || made["expires_at"] == nil || made["ack"] != false {
+		t.Fatalf("stream_link.created: %v", made)
+	}
+	var raw string
+	if err := c.DB.InTenant(context.Background(), ada.Workspace(t), func(tx pgx.Tx) error {
+		return tx.QueryRow(context.Background(), `SELECT coalesce(string_agg(detail::text, ' '), '') FROM audit_log`).Scan(&raw)
+	}); err != nil || !strings.Contains(raw, made["link"].(string)) {
+		t.Fatalf("the workspace's audit log: %v %s", err, raw)
+	}
+	if u := minted.URL; strings.Contains(raw, u) || strings.Contains(raw, u[strings.LastIndex(u, "/")+1:]) {
+		t.Fatalf("the audit log holds the link's URL or token: %s", raw)
+	}
 	ada.Do("GET", "/api/v1/apps", nil, &listed)
 	if len(listed.Apps) != 0 {
 		t.Fatalf("apps after revoking: %+v", listed)
@@ -91,7 +107,7 @@ func TestConsoleActionsAreAudited(t *testing.T) {
 	var first, next struct{ Entries []auditEntry }
 	ada.Do("GET", "/api/v1/audit?limit=3", nil, &first)
 	ada.Do("GET", fmt.Sprintf("/api/v1/audit?limit=100&before=%d", first.Entries[2].ID), nil, &next)
-	if len(first.Entries) != 3 || len(next.Entries) != 1 || next.Entries[0].Action != "subscription.created" {
+	if len(first.Entries) != 3 || len(next.Entries) != 2 || next.Entries[1].Action != "subscription.created" {
 		t.Fatalf("pages: %d then %d", len(first.Entries), len(next.Entries))
 	}
 	for _, q := range []string{"limit=0", "limit=101", "before=x", "before=-1"} {

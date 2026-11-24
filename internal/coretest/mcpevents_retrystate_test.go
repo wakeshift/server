@@ -15,9 +15,7 @@ import (
 // or retry window on to the next, which gets its own MaxAttempts.
 func TestMCPEventsRetryStateIsPerDelivery(t *testing.T) {
 	c, app, _, cb, _ := eventsConversation(t, false)
-	base := mcpevents.BackoffBase
-	mcpevents.BackoffBase = 200 * time.Millisecond // room to cancel between attempts
-	t.Cleanup(func() { mcpevents.BackoffBase = base })
+	t.Cleanup(mcpevents.SetBackoffBase(200 * time.Millisecond)) // room to cancel between attempts
 	tenant := tenantOf(t, c, "chat", "u1")
 	cb.status = func(n int) int {
 		if n <= 5 {

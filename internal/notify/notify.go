@@ -81,10 +81,10 @@ func (h *Hub) Run(ctx context.Context) {
 }
 
 // resyncPerWaiter and resyncSpread spread a resync's wakes out: each
-// woken waiter runs a claim transaction, so waking an instance's ~900
-// streams at once (on every listener reconnect, a Cloud SQL failover or
-// maintenance, on every instance together) saturated its pool for about a
-// second. Wakes go out about resyncPerWaiter apart, in random order, over
+// woken waiter runs a claim transaction, so waking all of a busy
+// instance's streams at once (on every listener reconnect, a database
+// failover or maintenance, on every instance together) can saturate its
+// pool. Wakes go out about resyncPerWaiter apart, in random order, over
 // at most resyncSpread: a few waiters are woken at once, a full instance's
 // over about 5 s. Variables, so tests can shorten them.
 var (

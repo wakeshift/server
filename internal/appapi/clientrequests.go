@@ -5,8 +5,8 @@ package appapi
 // The SDK offers the kinds it can run (callIn.ClientRequests), and runs one
 // only within fixed bounds it enforces itself. The first kind is an
 // elicitation form: Codex's install offer in Codex's own dialog, so the
-// user runs the install with no model step (GPT-6.2 Sol, Codex's default
-// since 0.169.1, never relays the text offer). Each outcome the SDK can see
+// user runs the install with no model step (Codex's default model doesn't
+// relay the text offer). Each outcome the SDK can see
 // has its own result text; the SDK reports the outcome with the request's
 // token:
 //
@@ -106,7 +106,7 @@ func offers(call callIn, kind string) bool {
 // offer, or "" if it gets the form: the app isn't on the setting, the SDK
 // doesn't offer the form, the turn isn't the user's (codex exec answers a
 // form by itself), or the model relays the text offer and runs the install
-// on a yes (GPT-6.1 Sol).
+// on a yes (the gpt-6.1 models).
 func (a *API) codexElicitSkip(cv *conversation) string {
 	switch {
 	case !a.CodexElicit.Allows(cv.app.ID):

@@ -17,10 +17,10 @@ import (
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
-// House agents: Wakeshift's own headless agents that keep the
+// House agents: headless agents the games' operator runs to keep the
 // games lively. One proves it's a house agent with a claim on each request,
-// signed with HOUSE_SECRET (Server.HouseSecret), which only the house
-// service and the games hold:
+// signed with HOUSE_SECRET (Server.HouseSecret), which only whatever runs
+// the house agents and the games hold:
 //
 //	X-Wakeshift-House: v2.<agent>.<model, base64url>.<expiry, unix seconds>.<signature, base64url>
 //
@@ -31,8 +31,8 @@ import (
 // a claim works only for the sign-in it was made for: one that leaks (a
 // log, a proxy) can't make another player a house player. A player
 // without the secret can't make one; a server without HouseSecret accepts
-// none. Wakeshift's house service signs it, and other games check the
-// same format; testdata/house-claims.json keeps them in step.
+// none. Whatever runs the house agents signs it, and other games check
+// the same format; testdata/house-claims.json keeps them in step.
 
 // HouseHeader carries a house agent's claim.
 const HouseHeader = "X-Wakeshift-House"
@@ -57,7 +57,7 @@ func houseSig(secret, game, agent, model string, exp int64, token string) []byte
 }
 
 // SignHouseClaim is a claim for game, valid until exp, for requests that
-// carry the bearer token token (tests; the house service signs its own).
+// carry the bearer token token (tests; house agents sign their own).
 func SignHouseClaim(secret, game string, c HouseClaim, token string, exp time.Time) string {
 	e := exp.Unix()
 	return strings.Join([]string{"v2", c.Agent, base64.RawURLEncoding.EncodeToString([]byte(c.Model)), strconv.FormatInt(e, 10),

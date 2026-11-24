@@ -28,8 +28,8 @@ func TestStoppedSendReleasesTheRest(t *testing.T) {
 	if _, err := d.Pool.Exec(ctx, `INSERT INTO apps (id, name) VALUES ('chat', 'Chat')`); err != nil {
 		t.Fatal(err)
 	}
-	AllowLoopback = true
-	t.Cleanup(func() { AllowLoopback = false })
+	SetAllowLoopback(true)
+	t.Cleanup(func() { SetAllowLoopback(false) })
 	arrived, done := make(chan struct{}, 1), make(chan struct{})
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		arrived <- struct{}{}

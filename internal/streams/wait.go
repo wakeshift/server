@@ -245,7 +245,7 @@ func (s *Server) ServeWait(w http.ResponseWriter, r *http.Request) {
 	// the wait checks as it takes the stream (errHooksConnected).
 	var holder string
 	batch, err := s.longPoll(ctx, PollRequest{Tenant: c.Tenant, Agent: l.Agent, Target: l.Target, Valid: valid, Wait: timeout, Connector: l.Connector},
-		pollOpts{wait: true, holder: &holder, untilHooks: untilHooks, untilWait: untilWait, keepalive: func() error { return t.ping(ctx) }})
+		pollOpts{wait: true, holder: &holder, untilHooks: untilHooks, untilWait: untilWait, keepalive: func() error { return t.ping(ctx) }, app: linkApp(l)})
 	s.admittedAs(refusalKey(c), err)
 	var installed *WaitInstalled
 	switch {

@@ -110,3 +110,26 @@ func TestBotIDOK(t *testing.T) {
 		}
 	}
 }
+
+// Authentic: only a nonce the codec derived for what the challenge names.
+func TestAuthentic(t *testing.T) {
+	c, other := NewCodec([]byte("key-one-0123456789abcdef")), NewCodec([]byte("key-two-0123456789abcdef"))
+	const tenant, id = "0b8f3c1e-2d4a-4b6c-8e0f-1a2b3c4d5e6f", "5e6f7a8b-9c0d-4e1f-a2b3-c4d5e6f7a8b9"
+	ch, err := Parse(c.Challenge(Register, tenant, id))
+	if err != nil || !c.Authentic(ch) {
+		t.Fatalf("its own challenge: %v", err)
+	}
+	if other.Authentic(ch) {
+		t.Fatal("another key's codec took it")
+	}
+	for _, alt := range []Challenge{
+		{Purpose: Setup, Tenant: ch.Tenant, ID: ch.ID, Nonce: ch.Nonce},
+		{Purpose: ch.Purpose, Tenant: id, ID: ch.ID, Nonce: ch.Nonce},
+		{Purpose: ch.Purpose, Tenant: ch.Tenant, ID: tenant, Nonce: ch.Nonce},
+		{Purpose: ch.Purpose, Tenant: ch.Tenant, ID: ch.ID, Nonce: make([]byte, 16)},
+	} {
+		if c.Authentic(alt) {
+			t.Fatalf("an altered challenge: %+v", alt)
+		}
+	}
+}

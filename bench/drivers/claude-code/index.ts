@@ -4,7 +4,7 @@
 // CLAUDE_CODE_OAUTH_TOKEN (only the file's path is typed; the token is never
 // copied or printed); without that file, the login keychain (symlinked). Either
 // way, a copy of ~/.claude.json's account record and cached feature flags
-// (no tokens; the flags decide whether Monitor exists). Zero install: Monitor on the session's wait loop.
+// (no tokens), so the session starts as the account's own would. Zero install: Monitor on the session's wait loop.
 // Install: Wakeshift's plugin for Claude Code (its marketplace, rendered by a
 // local core for itself), loaded with /reload-plugins; or, where the core
 // offers it, Wakeshift's installer's hooks in ~/.claude/settings.json.
@@ -235,7 +235,7 @@ export class ClaudeCode extends TmuxDriver implements Driver {
         hasCompletedOnboarding: true,
         theme: real.theme ?? "dark",
         autoUpdates: false,
-        // The account's cached feature flags, as they are (Monitor is behind one); no credentials.
+        // The account's cached feature flags, as they are; no credentials.
         ...cachedFlags(real),
         projects: { [l.home.work]: { hasTrustDialogAccepted: true, hasCompletedProjectOnboarding: true }, [l.home.real + "/work"]: { hasTrustDialogAccepted: true, hasCompletedProjectOnboarding: true } },
         // A server with a token (S11): the entry mcp add --header would write

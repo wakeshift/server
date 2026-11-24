@@ -780,7 +780,7 @@ func (a *API) codexResult(ctx context.Context, tx pgx.Tx, cv *conversation, why 
 		switch {
 		case running:
 			// Its connector runs: no install note, which would say it hasn't
-			// connected (wakebench, November 2, 2026).
+			// connected.
 			out.Text = join(harnesses.DeliversNote(codex, a.base(), appName(cv)), passSession(cv))
 		case a.pluginMarked(cv):
 			// Wakeshift's plugin (or the installer's hooks) marked the call:

@@ -270,6 +270,32 @@ func TestGraceRenewsOnce(t *testing.T) {
 	}
 }
 
+// A sliding link's URL is in the agent's text (its command), so a copy of
+// it renews only within TextLinkGrace; a connector's link, which its hooks
+// keep out of the text, still renews within RenewGrace.
+func TestGraceIsShorterForLinksInText(t *testing.T) {
+	f := setup(t)
+	wb := f.waitServer()
+	pb := f.pollServer()
+
+	late, _ := f.graceSession("monitor-late", true, time.Hour)
+	f.expire(late, streams.TextLinkGrace+time.Hour)
+	if w := wait(t, waitURL(wb, late, "timeout=1s")); w.code != 401 || f.renewed(late) {
+		t.Fatalf("a sliding link past TextLinkGrace: %d %v", w.code, w.last["type"])
+	}
+	inTime, _ := f.graceSession("monitor-in-time", true, time.Hour)
+	f.expire(inTime, streams.TextLinkGrace-time.Hour)
+	if w := wait(t, waitURL(wb, inTime, "timeout=1s")); w.code != 200 || w.last["type"] != "hub.next" || !f.renewed(inTime) {
+		t.Fatalf("a sliding link within TextLinkGrace: %d %v", w.code, w.last["type"])
+	}
+
+	connector, _ := f.graceSession("connector", false, time.Hour)
+	f.expire(connector, streams.TextLinkGrace+time.Hour)
+	if b := mustPoll(t, pb, token(connector), "wait=0"); b.Rotate == nil || !f.renewed(connector) {
+		t.Fatalf("a connector's link past TextLinkGrace: rotated %v", b.Rotate != nil)
+	}
+}
+
 // A Monitor's (sliding) link that expired while nothing used it: its wait
 // answers at once with the hub.next line naming its successor, keeping the
 // wait's timeout and until; the old link's wait then says it was renewed.

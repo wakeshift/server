@@ -1,6 +1,6 @@
 package wakeshift
 
-// One call of a tool that subscribes (design §2.4, §2.5): its *ToolCall,
+// One call of a tool that subscribes: its *ToolCall,
 // which event.Subscribe takes to subscribe the calling conversation. The
 // attachment adds one Wakeshift block to whatever the tool returns, so a
 // conversation can't be left unwakeable by a forgotten argument or an
@@ -850,7 +850,7 @@ func (e *Event[A, P]) subscribe(ctx context.Context, call *ToolCall, args A, opt
 
 // subscribeNative is Subscribe for a caller that subscribes itself: a
 // native line telling it what to subscribe to, once the event's own checks
-// pass for this caller (design §3), else unavailable, logged once per tool
+// pass for this caller, else unavailable, logged once per tool
 // and reason.
 func (e *Event[A, P]) subscribeNative(ctx context.Context, call *ToolCall, s *callScope, wire wireCall, args json.RawMessage, o subscribeOptions) (Subscription, error) {
 	if !e.t.open() && wire.AgentToken == "" && e.app.vouchersOfferedBy(ctx, time.Now().Add(e.app.subscribeBudget())) {

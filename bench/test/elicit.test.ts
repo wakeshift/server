@@ -1,6 +1,6 @@
 // R10 (R-elicit): Wakeshift's form in Codex's own dialog. The Codex
-// driver's reading of the form (screens from the elicitation prototype's
-// captures, with the message as the core writes it now), the CI app's
+// driver's reading of the form (screens captured from Codex, with the
+// message as the core writes it now), the CI app's
 // stateful mode (WB_CI_STATEFUL=1) with a form sent and answered during a
 // call, and R10's grading helpers.
 
@@ -37,7 +37,7 @@ const HEAD = `
 
 `;
 
-// The message as the core writes it, in Codex's bottom pane as the prototype's captures show a form.
+// The message as the core writes it, in Codex's bottom pane as a captured screen shows a form.
 const FORM = `${HEAD}  Field 1/1 (1 required unanswered)
   Wakeshift, for Shipyard:
   Shipyard sends its notifications through Wakeshift. To be told here when they arrive, even while you're away, install Wakeshift's plugin for Codex once. Wakeshift makes this plugin, not Shipyard.
@@ -54,7 +54,7 @@ const FORM = `${HEAD}  Field 1/1 (1 required unanswered)
   enter to submit | esc to cancel
 `;
 
-// The same at 90 columns (captures/ux1/03-selfrun-dialog-90col.txt's wrapping).
+// The same at 90 columns, wrapped as Codex wraps it.
 const FORM_90 = `${HEAD}  Field 1/1 (1 required unanswered)
   Wakeshift, for Shipyard:
   Shipyard sends its notifications through Wakeshift. To be told here when they
@@ -73,7 +73,7 @@ const FORM_90 = `${HEAD}  Field 1/1 (1 required unanswered)
   enter to submit | esc to cancel
 `;
 
-// captures/ux1/01-approval.txt: the MCP tool approval, a form of Codex's own.
+// The MCP tool approval, a form of Codex's own (captured).
 const APPROVAL = `${HEAD}  Field 1/1
   Allow the shipyard MCP server to run tool "watch_build"?
   number: 413
@@ -84,7 +84,7 @@ const APPROVAL = `${HEAD}  Field 1/1
   enter to submit | esc to cancel
 `;
 
-// captures/e2e-62-3/02-form.txt: the prototype's form, before the SDK wrote its first line (and with the options the other way round).
+// An earlier form, before the SDK wrote its first line (and with the options the other way round).
 const PROTOTYPE = `${HEAD}  Field 1/1 (1 required unanswered)
   Wakebench sends its notifications through Wakeshift. Set it up once, and this conversation is told when bench events arrive, even while you're away.
 

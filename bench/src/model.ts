@@ -200,7 +200,7 @@ export function parseScenarios(spec: string): ScenarioId[] {
       continue;
     }
     // S10 has no harness: a spec client against a local core (src/s10.ts).
-    if (part === "S10") throw new Error("S10 runs on its own, not through a harness: make bench-s10 (node dist/src/s10.js)");
+    if (part === "S10") throw new Error("S10 runs on its own, not through a harness: node dist/src/s10.js, in bench/");
     const r = /^R(\d{1,2})(?:-R?(\d{1,2}))?$/.exec(part);
     if (r) {
       const a = Number(r[1]);

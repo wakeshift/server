@@ -19,11 +19,11 @@ func TestCopiesMatch(t *testing.T) {
 	for p, want := range files {
 		got, err := os.ReadFile(filepath.Join(root, p))
 		if err != nil {
-			t.Errorf("%s: %v (run make mcp-events-clients)", p, err)
+			t.Errorf("%s: %v (run go generate ./internal/mcpevents/clientsgen)", p, err)
 			continue
 		}
 		if !bytes.Equal(got, want) {
-			t.Errorf("%s is out of date: run make mcp-events-clients", p)
+			t.Errorf("%s is out of date: run go generate ./internal/mcpevents/clientsgen", p)
 		}
 	}
 }

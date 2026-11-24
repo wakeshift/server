@@ -34,7 +34,7 @@ func (p *takenPoller) Poll(ctx context.Context, link string, wait time.Duration,
 	return p.fakePoller.Poll(ctx, link, wait, patient)
 }
 
-// The bench's S8 (Claude Code): after each wake, the next waiter exited
+// Claude Code: after each wake, the next waiter used to exit
 // within a second or two because a tool hook's poll took the stream ("a
 // newer hook"), and nothing listened. The newest waiter now takes the
 // stream back and keeps listening; only a waiter that a newer one
@@ -78,7 +78,7 @@ func TestNewestWaiterKeepsListening(t *testing.T) {
 
 // Claude Code shows a PostToolUse hook's context only at the next user
 // prompt, so that hook mustn't take messages (they'd be confirmed and not
-// reach the model: S8's acked_unseen), nor poll the stream (it would take
+// reach the model), nor poll the stream (it would take
 // it from the waiter). The waiter delivers them.
 func TestClaudeToolHookLeavesMessagesForTheWaiter(t *testing.T) {
 	ws := newFakeWakeshift(t)

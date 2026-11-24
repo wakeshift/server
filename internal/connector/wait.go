@@ -362,7 +362,7 @@ func (w *Waiter) Run(ctx context.Context) int {
 		} else if r.status != http.StatusOK || r.next == "" {
 			// Cut short, or Wakeshift busy: wait a little (as long as it
 			// asked, if it did), then the same again.
-			if !sleepCtx(ctx, retryWait(retry, r.after)) {
+			if !sleepAtLeast(ctx, retryWait(retry, r.after), r.after) {
 				return 0
 			}
 		}
@@ -472,7 +472,7 @@ func (w *Waiter) runMany(ctx context.Context, links []string) int {
 						link = n
 					}
 				} else if r.status != http.StatusOK || r.next == "" {
-					if !sleepCtx(ctx, retryWait(retry, r.after)) {
+					if !sleepAtLeast(ctx, retryWait(retry, r.after), r.after) {
 						stop()
 						return
 					}
@@ -630,6 +630,17 @@ func sleepCtx(ctx context.Context, d time.Duration) bool {
 	case <-ctx.Done():
 		return false
 	case <-time.After(Jitter(d)):
+		return true
+	}
+}
+
+// sleepAtLeast is sleepCtx, never shorter than floor: a wait the server
+// asked for (Retry-After) is spread up, never cut short by the jitter.
+func sleepAtLeast(ctx context.Context, d, floor time.Duration) bool {
+	select {
+	case <-ctx.Done():
+		return false
+	case <-time.After(max(Jitter(d), floor)):
 		return true
 	}
 }

@@ -86,6 +86,9 @@ func run() error {
 	if cfg.GitHubClientID != "" {
 		github = &auth.GitHub{ClientID: cfg.GitHubClientID, ClientSecret: cfg.GitHubClientSecret}
 	}
+	if cfg.SignupsClosed() && cfg.AllowedSignups == "" && (google != nil || github != nil) {
+		slog.Warn("sign-up is closed and WAKESHIFT_ALLOWED_SIGNUPS is empty: nobody new can make an account; set it, or WAKESHIFT_OPEN_SIGNUPS=1 (docs/self-hosting.md)")
+	}
 	var sender mail.Sender
 	if cfg.ResendKey != "" || cfg.ResendKeySecret != "" {
 		sender = &mail.Resend{From: cfg.MailFrom, Key: cfg.ResendKey, KeySecret: cfg.ResendKeySecret}
@@ -99,7 +102,7 @@ func run() error {
 	c, err := core.New(ctx, core.Options{
 		DB: database, PublicURL: cfg.PublicURL, SiteURL: cfg.SiteURL, Key: cfg.Key, Apps: cfg.Apps,
 		TermsURL: cfg.TermsURL, TermsVersion: cfg.TermsVersion, PrivacyURL: cfg.PrivacyURL, SupportEmail: cfg.SupportEmail,
-		AllowedSignups: cfg.AllowedSignups, DevSignIn: cfg.DevSignIn, DevSignInToken: cfg.DevSignInToken, Google: google, GitHub: github, InvitesPerUser: cfg.InvitesPerUser, Web: web.Dist, ConnectorDir: cfg.ConnectorDir,
+		AllowedSignups: cfg.AllowedSignups, ClosedSignups: cfg.SignupsClosed(), DevSignIn: cfg.DevSignIn, DevSignInToken: cfg.DevSignInToken, Google: google, GitHub: github, InvitesPerUser: cfg.InvitesPerUser, Web: web.Dist, ConnectorDir: cfg.ConnectorDir,
 		MaxStreams: cfg.MaxStreams, Connectors: cfg.Connectors, Mail: sender,
 		AdminEmails:         cfg.AdminEmails,
 		AdminServiceAccount: cfg.AdminServiceAccount, AdminIAPAudience: cfg.AdminIAPAudience,
@@ -120,8 +123,9 @@ func run() error {
 		Addr:              cfg.Addr,
 		Handler:           c.Handler,
 		ReadHeaderTimeout: 10 * time.Second,
-		// No read or write timeout (streams and long polls stay open), but
-		// an idle keep-alive connection closes.
+		// No read or write timeout (streams and long polls stay open): a
+		// request's body has server.BodyReadTimeout instead, and an idle
+		// keep-alive connection closes.
 		IdleTimeout: 2 * time.Minute,
 	}
 	errc := make(chan error, 1)

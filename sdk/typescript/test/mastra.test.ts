@@ -3,8 +3,8 @@
 // (@modelcontextprotocol/server 2.x) per request, from createServerInstance,
 // with its own tools/list and tools/call (a Mastra tool's execute gets
 // { mcp: { extra: { ...ctx } } }) and, optionally, its own MCP Events. The
-// real MCPServer runs in sdk/compat (ts-mastra), pinned and on its newest
-// release.
+// real MCPServer runs in Wakeshift's compatibility tests, pinned and on its
+// newest release.
 
 import { test } from "node:test";
 import { readFileSync } from "node:fs";

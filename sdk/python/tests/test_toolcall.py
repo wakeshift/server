@@ -963,7 +963,7 @@ async def test_native_callers() -> None:
             },
         }
         await call_tool(rpc, "join", {"table": "oak"}, ua="openai-mcp/1.0.0", meta=regular)
-        assert seen == [(False, None)]  # nor is its regular chat (the probe of November 10, 07:09:57)
+        assert seen == [(False, None)]  # nor is its regular chat (as observed)
         w.core.reset()
         await call_tool(rpc, "leave", {"table": "oak"}, ua="openai-mcp/1.0.0")
     ends = w.core.bodies("/event-subscriptions/end")

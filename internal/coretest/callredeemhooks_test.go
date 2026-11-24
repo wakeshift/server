@@ -21,8 +21,7 @@ import (
 	"github.com/wakeshift/server/internal/version"
 )
 
-// Redeem by call with the real hooks (docs/harnesses.md, "Redeem by
-// call"): the PreToolUse claim, then PostToolUse by the call's ID with no
+// Redeem by call with the real hooks: the PreToolUse claim, then PostToolUse by the call's ID with no
 // transcript; every other case by the beacon.
 func TestRedeemByCallHooks(t *testing.T) {
 	c := coretest.StartWith(t, func(o *core.Options) { o.RedeemByToolCall = true })

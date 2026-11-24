@@ -692,9 +692,11 @@ async def test_fastmcp_against_a_real_core() -> None:
 async def test_a_chatgpt_shaped_client_redeems_a_subscribe_voucher() -> None:
     """A ChatGPT-shaped client against a real core with subscribe vouchers:
     openai-mcp, a stateless server (no
-    Mcp-Session-Id), _meta["openai/session"] on tool calls, a webhook on
-    127.0.0.1. The tool's result hands out the voucher; an emit lands before
-    the subscribe and is replayed. Skipped on a core without vouchers."""
+    Mcp-Session-Id), _meta["openai/session"] on tool calls, a signed-in
+    user, a webhook on 127.0.0.1. The tool's result hands out the voucher;
+    an emit lands before the subscribe and is replayed. Skipped on a core
+    without vouchers. (Anonymous, without a transport session, it would get
+    no voucher: one bound to nothing is a bearer.)"""
     core, key = harness()
     wake = Wakeshift(key, core=core)
     subscribed: list[tuple[str | None, str, str | None]] = []
@@ -706,7 +708,7 @@ async def test_a_chatgpt_shaped_client_redeems_a_subscribe_voucher() -> None:
         on_subscribe=lambda s: subscribed.append((s.user, s.via, s.tool)),
     )
     server = MCPServer("crawler")
-    attached = wake.attach(server)
+    attached = wake.attach(server, identify=lambda r: Identity(user="gpt-user"))
 
     @attached.tool(subscribes=[crawl])
     async def start_crawl(job: str, call: ToolCall) -> str:
@@ -805,7 +807,7 @@ async def test_a_chatgpt_shaped_client_redeems_a_subscribe_voucher() -> None:
             )
             assert other["error"]["code"] == -32012, other
             await asyncio.sleep(0.1)
-            assert subscribed == [(None, "tool", "start_crawl")]
+            assert subscribed == [("gpt-user", "tool", "start_crawl")]
             await rpc("events/unsubscribe", {**params, "_meta": meta}, headers=gpt26("events/unsubscribe"))
     finally:
         hook.shutdown()

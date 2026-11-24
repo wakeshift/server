@@ -56,8 +56,7 @@ func init() {
 	register(Spec{Name: copilotName, Format: copilotFormat{}, Installer: copilotInstaller{},
 		When:     "when the agent finishes a turn; while it's idle, they wait for the next one",
 		StopWait: 5 * time.Second,
-		// No Rule: Copilot CLI has no global allowlist for commands
-		// (docs/harnesses.md, "Pre-approving Wakeshift's commands"); its
+		// No Rule: Copilot CLI has no global allowlist for commands; its
 		// permissionRequest hook approves the wait command instead.
 		Wait: true, RecordProcs: true,
 	})

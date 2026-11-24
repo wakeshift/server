@@ -18,8 +18,8 @@ type ciRun struct {
 	Status string `json:"status" jsonschema:"How it ended"`
 }
 
-// Processes sharing one key, each with its own events (found in the launch
-// rehearsal): an MCP server, a second server and an emitter. Each server
+// Processes sharing one key, each with its own events (found in testing):
+// an MCP server, a second server and an emitter. Each server
 // merges its events into the manifest; the emitter never sends it. None
 // removes another's events, so every emit keeps working. Only an explicit
 // publish, which replaces the manifest, removes one.

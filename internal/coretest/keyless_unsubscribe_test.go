@@ -30,8 +30,8 @@ func rawUnsubscribe(t *testing.T, app *wakeshift.Client, call caller, topic stri
 	return out.Ended, out.Addition.Text
 }
 
-// An unsubscribe without the session key (wakebench S7, py-mcpserver on
-// Claude Code's Monitor path: the agent then watched again without it and
+// An unsubscribe without the session key (in testing, a Python MCP server
+// on Claude Code's Monitor path: the agent then watched again without it and
 // got every message twice) ends nothing, and its answer says why: call
 // again with the key, and don't subscribe again before. For any tool, the
 // SDKs' own unsubscribe_events or a wrapped tool's call.unsubscribe (whose

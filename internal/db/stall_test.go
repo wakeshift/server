@@ -17,9 +17,9 @@ import (
 )
 
 // stall is a connection path that can stop carrying bytes, both ways,
-// while both ends stay open: what the Cloud SQL connector's tunnel did on
-// 2026-11-12, when a transaction's connection went quiet for 67 s and its
-// locks stayed held. Neither end sees an error; bytes just stop.
+// while both ends stay open, as a proxy's tunnel can: a transaction's
+// connection goes quiet and its locks stay held. Neither end sees an
+// error; bytes just stop.
 type stall struct {
 	mu      sync.Mutex
 	stalled bool

@@ -416,8 +416,7 @@ func TestWaitWithoutLoopUnchanged(t *testing.T) {
 	}
 }
 
-// loopLine is the one-line command (docs/harnesses.md, "The wait's loop
-// mode"), for a link file named name, with query added (a test's short
+// loopLine is the wait's one-line loop command, for a link file named name, with query added (a test's short
 // timeout).
 func loopLine(name, u, query string) string {
 	prefix, _, _ := strings.Cut(u, "?")

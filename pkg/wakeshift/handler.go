@@ -1,8 +1,7 @@
 package wakeshift
 
 // Handler: Wakeshift at the HTTP layer, in front of the MCP library's own
-// handler (design §2.3, "Go: the HTTP layer is where the guarantees
-// hold"). It reads each POST once, moves Wakeshift's arguments out of every
+// handler: the HTTP layer is where the guarantees hold. It reads each POST once, moves Wakeshift's arguments out of every
 // tools/call's arguments before go-sdk or mcp-go parses the body (so no
 // middleware, validation or tool of yours sees them), answers events/* and
 // the wait tool, and makes the POST the unit of identity: Identify runs at

@@ -716,7 +716,8 @@ async function startLocalCore(o: StartOptions, keyFile: string, keyFile2: string
   const adminUrl = `postgres://postgres:postgres@localhost:5439/${name}?sslmode=disable`;
 
   // WB_CORE_PORT: a fixed port, for a package packed to trust this core
-  // (opencode's npm plugin: plugins/pack-npm.mjs --issuer).
+  // (opencode's npm plugin, packed with --issuer by plugins/pack-npm.mjs in
+  // github.com/wakeshift/connectors).
   const port = Number(process.env.WB_CORE_PORT) || (await freePort());
   // WB_CORE_PUBLIC_PORT: the core's public URL (its issuer: what hooks and
   // harnesses reach) on another port than it listens on, where something

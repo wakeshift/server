@@ -21,7 +21,10 @@ const (
 	SignInRevoked      = "signin.revoked" // a sign-in (refresh token family) ended: by its client, or on reuse
 	AppConnected       = "app.connected"  // the user sent to an app to finish connecting it to the workspace
 	StreamLinksRevoked = "stream_links.revoked"
-	ConnectorLinked    = "connector.linked" // a connector redeemed a beacon's ticket for a session's stream link
+	// StreamLinkCreated: a user minted a stream link for an agent in the
+	// console (detail: link, its ID; ack; expires_at). Never the URL.
+	StreamLinkCreated = "stream_link.created"
+	ConnectorLinked   = "connector.linked" // a connector redeemed a beacon's ticket for a session's stream link
 	// ConnectorCallKeyMismatch (redeem by call): a redeem by a call's
 	// ID was signed by another key than the one that claimed the call
 	// (detail: session, outcome, the key's fingerprint; never the call ID).

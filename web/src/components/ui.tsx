@@ -1,4 +1,4 @@
-// The console's components, in the marketing site's style (site/static/site.css):
+// The console's components, in the marketing site's style:
 // paper background, cards with a hairline rule, serif headings, ink pill
 // buttons, mono kickers. Pages use these rather than their own classes.
 import { isValidElement, useEffect, useId, useRef, useState, type ButtonHTMLAttributes, type InputHTMLAttributes, type ReactNode } from 'react'
