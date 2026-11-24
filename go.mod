@@ -12,7 +12,7 @@ require (
 	github.com/go-jose/go-jose/v4 v4.1.9
 	github.com/google/jsonschema-go v0.4.3
 	github.com/google/uuid v1.6.0
-	github.com/jackc/pgx/v5 v5.12.0
+	github.com/jackc/pgx/v5 v5.13.0
 	github.com/mark3labs/mcp-go v1.6.0
 	github.com/modelcontextprotocol/go-sdk v1.8.0
 	github.com/yuin/goldmark v1.8.7
@@ -25,7 +25,7 @@ require (
 	go.opentelemetry.io/otel/sdk v1.47.0
 	go.opentelemetry.io/otel/sdk/log v1.47.0
 	go.opentelemetry.io/otel/trace v1.47.0
-	golang.org/x/oauth2 v0.37.0
+	golang.org/x/oauth2 v0.38.0
 	golang.org/x/sys v0.50.0
 )
 
