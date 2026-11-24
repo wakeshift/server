@@ -1,6 +1,28 @@
-# Wakeshift server
+<h1 align="center">
+  <a href="https://wakeshift.ai">
+    <picture>
+      <source media="(prefers-color-scheme: dark)" srcset="docs/images/wakeshift-dark.svg">
+      <img alt="Wakeshift" src="docs/images/wakeshift.svg" width="320">
+    </picture>
+  </a>
+</h1>
 
-Wakeshift lets an MCP server wake the AI agents that use it.
+<p align="center">Wakeshift lets an MCP server wake the AI agents that use it.<br>This is its server: run it yourself, or use the hosted service at <a href="https://wakeshift.ai">wakeshift.ai</a>.</p>
+
+<p align="center">
+  <a href="https://wakeshift.ai/docs">Docs</a> ·
+  <a href="https://wakeshift.ai/docs/how-it-works">How it works</a> ·
+  <a href="#try-it-with-your-agent">Try it</a> ·
+  <a href="docs/self-hosting.md">Self-hosting</a> ·
+  <a href="docs/harnesses.md">Agents</a>
+</p>
+
+<p align="center">
+  <a href="LICENSE"><img alt="License: Apache-2.0" src="https://img.shields.io/badge/license-Apache--2.0-blue"></a>
+  <a href="https://github.com/wakeshift/server/actions/workflows/ci.yml"><img alt="CI" src="https://github.com/wakeshift/server/actions/workflows/ci.yml/badge.svg"></a>
+</p>
+
+[![How Wakeshift works. Your app is on the left: your MCP server with the Wakeshift SDK attached, where defineEvent names the event, call.subscribe() runs in your MCP tool and emit() runs from your backend. Their agent is on the right, Wakeshift in the middle. 1, subscribe: the agent calls your tool, which subscribes its conversation with Wakeshift. 2, emit: your backend emits the event to Wakeshift. 3, wake: Wakeshift wakes the subscribed conversation through the agent's own MCP Events, Wakeshift's plugin (installed once, only if the user agrees) or a background listener, and the event arrives marked as coming from your app.](docs/images/how-it-works.svg)](https://wakeshift.ai/docs/how-it-works)
 
 Your MCP server has events: a build finished, a reply arrived, a job is done. MCP Events (SEP-3415) is the standard way to offer them, and few agents subscribe to it yet (opencode 2.4 does): Claude Code, Codex, Cursor and most others never hear about your event. This server closes that gap. Run it next to your MCP server and:
 

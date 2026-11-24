@@ -9,6 +9,6 @@ The code in this repository is licensed under the Apache License 2.0. The licens
 
 You may say what your service is built on or works with, for example "built on the Wakeshift server", "a fork of Wakeshift" or "compatible with Wakeshift".
 
-The console and the agent picker (`apps/agentpicker/static/agent-logos.svg`) also show the logos of the agents Wakeshift wakes (Claude, OpenAI, Cursor, GitHub Copilot, opencode, Antigravity, pi, Hermes Agent and Grok). They belong to their owners, aren't licensed by this repository, and are used only to name those products: see [NOTICE](NOTICE).
+The console, the agent picker (`apps/agentpicker/static/agent-logos.svg`) and the README's diagram (`docs/images/how-it-works.svg`) also show the logos of the agents Wakeshift wakes (Claude, OpenAI, Cursor, GitHub Copilot, opencode, Antigravity, pi, Hermes Agent and Grok). They belong to their owners, aren't licensed by this repository, and are used only to name those products: see [NOTICE](NOTICE).
 
 Questions: support@wakeshift.ai.

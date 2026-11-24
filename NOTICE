@@ -11,10 +11,10 @@ Version 2.0.
 OpenAI Codex
 Copyright 2025 OpenAI
 
-The console and the agent picker show the logos of the agents Wakeshift wakes
-(web/src/components/AgentLogos.tsx, web/public/logos/hermes-agent.svg and
-apps/agentpicker/static/agent-logos.svg, which the agent picker's pages
-reference):
+The console, the agent picker and the README's diagram show the logos of the
+agents Wakeshift wakes (web/src/components/AgentLogos.tsx,
+web/public/logos/hermes-agent.svg, apps/agentpicker/static/agent-logos.svg,
+which the agent picker's pages reference, and docs/images/how-it-works.svg):
 Claude (Anthropic), OpenAI (Codex), Cursor, GitHub Copilot, opencode,
 Google Antigravity, pi, Hermes Agent (Nous Research) and Grok (xAI). They are
 trademarks of their owners, used only to name those products. They are not
