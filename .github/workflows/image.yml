@@ -1,0 +1,83 @@
+name: Image
+
+# The container image, ghcr.io/wakeshift/server, for linux/amd64 and
+# linux/arm64, at each SemVer tag (v1.2.3, or v1.2.3-rc.1): tagged with the
+# version, and a release (no prerelease part) with latest too, with build
+# provenance and an SBOM attached, and signed keylessly with Sigstore
+# (cosign, through this workflow's GitHub OIDC identity). It pushes with
+# the workflow's own GITHUB_TOKEN: no stored secret.
+#
+#   cosign verify ghcr.io/wakeshift/server:<version> \
+#     --certificate-identity-regexp '^https://github.com/wakeshift/server/\.github/workflows/image\.yml@refs/(tags/v|heads/main$)' \
+#     --certificate-oidc-issuer https://token.actions.githubusercontent.com
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: An existing version tag to build again (v1.2.3)
+        required: true
+
+permissions:
+  contents: read
+
+concurrency:
+  group: image-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  image:
+    name: Build, push and sign
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      packages: write # push to ghcr.io with GITHUB_TOKEN
+      id-token: write # cosign's keyless signature
+    env:
+      IMAGE: ghcr.io/${{ github.repository_owner }}/server
+      TAG: ${{ inputs.tag || github.ref_name }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ env.TAG }}
+      # A SemVer version (v1.2.3, or v1.2.3-rc.1); only a release (no
+      # prerelease part) moves latest.
+      - name: Check the tag
+        run: |
+          if ! printf '%s\n' "$TAG" | grep -Eqx 'v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-[0-9A-Za-z]+(\.[0-9A-Za-z]+)*)?'; then
+            echo "::error::$TAG isn't a version tag (v1.2.3 or v1.2.3-rc.1)"
+            exit 1
+          fi
+          case "$TAG" in
+          *-*) echo "RELEASE=0" >>"$GITHUB_ENV" ;;
+          *) echo "RELEASE=1" >>"$GITHUB_ENV" ;;
+          esac
+      - uses: sigstore/cosign-installer@756fe2d284c7292c4e9b62c8a28f1e5629c59532 # v4.1.3
+      - name: Log in to ghcr.io
+        env:
+          TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: printf '%s' "$TOKEN" | docker login ghcr.io -u "$GITHUB_ACTOR" --password-stdin
+      # The Dockerfile cross-compiles, so both platforms build natively.
+      - name: Build and push
+        run: |
+          tags=(--tag "$IMAGE:${TAG#v}")
+          if [ "$RELEASE" = 1 ]; then tags+=(--tag "$IMAGE:latest"); fi
+          docker buildx create --use --name multi
+          docker buildx build --platform linux/amd64,linux/arm64 \
+            --build-arg VERSION="${TAG#v}" \
+            --provenance=mode=max --sbom=true \
+            --label org.opencontainers.image.source="https://github.com/${GITHUB_REPOSITORY}" \
+            --label org.opencontainers.image.revision="$(git rev-parse HEAD)" \
+            --label org.opencontainers.image.version="${TAG#v}" \
+            --label org.opencontainers.image.licenses=Apache-2.0 \
+            "${tags[@]}" \
+            --metadata-file "$RUNNER_TEMP/metadata.json" --push .
+      - name: Sign
+        run: |
+          digest=$(python3 -c 'import json, sys; print(json.load(open(sys.argv[1]))["containerimage.digest"])' "$RUNNER_TEMP/metadata.json")
+          cosign sign --yes "$IMAGE@$digest"
+          also=
+          if [ "$RELEASE" = 1 ]; then also=", latest"; fi
+          echo "Pushed and signed $IMAGE@$digest (${TAG#v}$also)" >>"$GITHUB_STEP_SUMMARY"

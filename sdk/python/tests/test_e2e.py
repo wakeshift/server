@@ -1,0 +1,812 @@
+"""End to end against a real core: run with scripts/e2e.sh in Wakeshift's own
+repository, which starts one with a self-serve app and points WAKESHIFT_SDK_HARNESS at its URL and test key. Skipped without it."""
+
+from __future__ import annotations
+
+import asyncio
+import base64
+import hashlib
+import hmac
+import json
+import os
+import queue
+import re
+import secrets
+import signal
+import subprocess
+import tempfile
+import threading
+from collections.abc import Iterator
+from contextlib import contextmanager
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from typing import Any
+
+import httpx2
+import pytest
+from mcp.server.mcpserver import MCPServer
+from pydantic import BaseModel
+
+from wakeshift import APIError, Identity, Recipient, Request, Subscription, ToolCall, UsageError, Wakeshift
+
+from .helpers import Rpc, initialize, served
+
+pytestmark = pytest.mark.e2e
+
+HARNESS = os.environ.get("WAKESHIFT_SDK_HARNESS", "")
+
+
+def harness() -> tuple[str, str]:
+    if not HARNESS:
+        pytest.skip("set WAKESHIFT_SDK_HARNESS (scripts/e2e.sh)")
+    with open(HARNESS) as f:
+        h = json.load(f)
+    return h["core"], h["key"]
+
+
+class Lines:
+    """The command Claude Code's Monitor is given (the session's wait in a
+    loop), run in sh as Monitor runs it: one JSON line per event."""
+
+    def __init__(self, cmd: str) -> None:
+        self.q: queue.Queue[dict[str, Any]] = queue.Queue()
+        self.proc = subprocess.Popen(
+            ["sh", "-c", cmd],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            start_new_session=True,
+            env={**os.environ, "HOME": LINK_HOME},
+        )
+        threading.Thread(target=self._read, daemon=True).start()
+
+    def _read(self) -> None:
+        assert self.proc.stdout is not None
+        for raw in self.proc.stdout:
+            line = raw.decode().strip()
+            if not line:
+                continue
+            ev = json.loads(line)
+            if ev.get("type") == "event":
+                self.q.put(ev)
+
+    async def next(self, timeout: float = 5.0) -> dict[str, Any]:
+        return await asyncio.to_thread(self.q.get, True, timeout)
+
+    async def expect(self, subject: str) -> dict[str, Any]:
+        ev = await self.next()
+        assert ev["subject"] == subject
+        return ev
+
+    async def expect_nothing(self, timeout: float = 0.7) -> None:
+        with pytest.raises(queue.Empty):
+            await self.next(timeout)
+
+    def stop(self) -> None:
+        try:
+            os.killpg(self.proc.pid, signal.SIGKILL)  # its curl too
+        except ProcessLookupError:
+            pass
+        self.proc.wait()
+
+
+@contextmanager
+def receiver() -> Iterator[tuple[str, str, list[dict[str, Any]]]]:
+    """A callback that speaks MCP Events webhooks as a client would: it checks
+    the Standard Webhooks signature with its secret, echoes the verification
+    challenge, and keeps each occurrence."""
+    key = secrets.token_bytes(32)
+    got: list[dict[str, Any]] = []
+
+    class Handler(BaseHTTPRequestHandler):
+        def log_message(self, *_: Any) -> None:
+            pass
+
+        def do_POST(self) -> None:
+            raw = self.rfile.read(int(self.headers.get("content-length") or 0))
+            signed = f"{self.headers.get('webhook-id', '')}.{self.headers.get('webhook-timestamp', '')}.".encode() + raw
+            want = "v1," + base64.b64encode(hmac.new(key, signed, hashlib.sha256).digest()).decode()
+            if want not in (self.headers.get("webhook-signature") or "").split(" "):
+                self.send_response(401)
+                self.end_headers()
+                return
+            body = json.loads(raw)
+            if body.get("type") == "verification":
+                out = json.dumps({"challenge": body["challenge"]}).encode()
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(out)))
+                self.end_headers()
+                self.wfile.write(out)
+                return
+            if not body.get("type"):
+                got.append({"name": body.get("name"), "data": body.get("data"), "meta": body.get("_meta")})
+            self.send_response(202)
+            self.end_headers()
+
+    srv = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    try:
+        yield f"http://127.0.0.1:{srv.server_address[1]}/cb", "whsec_" + base64.b64encode(key).decode(), got
+    finally:
+        srv.shutdown()
+        srv.server_close()
+
+
+def text_of(r: dict[str, Any]) -> str:
+    assert "result" in r, r
+    return "\n".join(c.get("text", "") for c in r["result"]["content"])
+
+
+MONITOR = re.compile(r"with this command: (f=\$HOME/\.wakeshift/links/[0-9a-f]{16}; [^\n]*?c=; p=\$PPID; .*?; done; fi) \.")
+LINK_STEP = re.compile(
+    r"If you haven't written this conversation's link to the file ~/\.wakeshift/links/([0-9a-f]{16}) yet, first write it .*? its whole content this one line: (\S+) \."
+)
+# Since November 2026 the Monitor's command reads the conversation's link
+# from a file the agent writes with its file tool (the result's link step):
+# monitor_of writes it as the agent would, in a HOME of these tests' own,
+# and the commands run with that HOME.
+LINK_HOME = tempfile.mkdtemp(prefix="wakeshift-links-")
+
+
+def monitor_of(r: dict[str, Any]) -> str:
+    text = text_of(r)
+    for key, link in LINK_STEP.findall(text):
+        os.makedirs(os.path.join(LINK_HOME, ".wakeshift", "links"), exist_ok=True)
+        with open(os.path.join(LINK_HOME, ".wakeshift", "links", key), "w") as f:
+            f.write(link + "\n")
+    m = MONITOR.search(text)
+    assert m, text
+    return m.group(1)
+
+
+async def eventually(what: str, fn: Any, timeout: float = 5.0) -> Any:
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + timeout
+    while True:
+        v = fn()
+        if v:
+            return v
+        if loop.time() > deadline:
+            raise AssertionError(f"timed out waiting for {what}")
+        await asyncio.sleep(0.1)
+
+
+class Build(BaseModel):
+    conclusion: str
+    url: str
+
+
+class Repo(BaseModel):
+    repo: str
+
+
+class Table(BaseModel):
+    table: str
+
+
+class Turn(BaseModel):
+    hole: list[str]
+    toCall: float
+
+
+async def test_events_defined_served_emitted_bridged_and_native() -> None:
+    core, key = harness()
+    wake = Wakeshift(key, core=core)
+    build = wake.define_event(
+        "ci.build",
+        description="A CI run on a repo finished",
+        args=Repo,
+        payload=Build,
+        text=lambda b, a: f"CI {b.conclusion} on {a.repo}",
+        authorize=lambda s, a: a.repo != "secret",
+    )
+    turn = wake.define_event(
+        "game.turn",
+        description="It's your move at a table",
+        args=Table,
+        payload=Turn,
+        text=lambda p, a: f"Your move: {' '.join(p.hole)}, {p.toCall:g} to call",
+        personal=True,
+    )
+
+    # One server; each connection's user comes from a header here (an app's own sign-in in practice).
+    server = MCPServer("ci-bot")
+    wake.attach(server, identify=lambda r: Identity(user=r.headers.get("x-user")))
+    lines: list[Lines] = []
+    try:
+        async with served(server, stateless=False) as (client, _):
+
+            async def connect(name: str, user: str) -> Rpc:
+                rpc = Rpc(client, "/mcp", headers={"X-User": user})
+                await initialize(rpc, name)
+                return rpc
+
+            async def tool(rpc: Rpc, name: str, args: dict[str, Any]) -> dict[str, Any]:
+                return await rpc("tools/call", {"name": name, "arguments": args})
+
+            # Bridged (Claude Code): subscribe_events, then a wake through the Monitor.
+            claude = await connect("claude-code", "bob")
+            sub = await tool(claude, "subscribe_events", {"event": "ci.build", "arguments": {"repo": "acme"}})
+            assert re.match(r'^Subscribed to ci\.build \{"repo":"acme"\}\.', text_of(sub))
+            bob = Lines(monitor_of(sub))
+            lines.append(bob)
+            refused = await tool(claude, "subscribe_events", {"event": "ci.build", "arguments": {"repo": "secret"}})
+            assert refused["result"]["isError"] is True
+            assert (await build.emit({"repo": "acme"}, {"conclusion": "failure", "url": "https://ci.example/1"})).matched == 1
+            got = await bob.expect("CI failure on acme")
+            assert got["data"]["url"] == "https://ci.example/1"
+            assert got["from"] == f"app/{wake.app_id}"
+
+            # Personal: two players at one table; each turn reaches only its player.
+            p1 = await connect("claude-code", "p1")
+            p2 = await connect("claude-code", "p2")
+            p1_lines = Lines(monitor_of(await tool(p1, "subscribe_events", {"event": "game.turn", "arguments": {"table": "t1"}})))
+            lines.append(p1_lines)
+            p2_sub = await tool(p2, "subscribe_events", {"event": "game.turn", "arguments": {"table": "t1"}})
+            p2_lines = Lines(monitor_of(p2_sub))
+            lines.append(p2_lines)
+            m = re.search(r'session_key="(wsc_[a-z2-7]+)"', text_of(p2_sub))
+            assert m, text_of(p2_sub)
+            p2_session = m.group(1)
+            with pytest.raises(UsageError, match="personal"):
+                await turn.emit({"table": "t1"}, {"hole": ["As", "Kd"], "toCall": 2})
+            assert (await turn.emit({"table": "t1"}, {"hole": ["As", "Kd"], "toCall": 2}, to="p1")).matched == 1
+            assert (await p1_lines.expect("Your move: As Kd, 2 to call"))["data"]["hole"] == ["As", "Kd"]
+            await p2_lines.expect_nothing()
+            await turn.emit({"table": "t1"}, {"hole": ["7c", "7d"], "toCall": 4}, to="p2")
+            await p2_lines.expect("Your move: 7c 7d, 4 to call")
+            await p1_lines.expect_nothing()
+
+            # An event's publish URL: a POST's body is the payload, checked against
+            # the schema; a personal event's goes to the one subscriber it's for.
+            async with httpx2.AsyncClient() as web:
+                build_url = await build.create_publish_url({"repo": "acme"})
+                assert build_url.event == "ci.build" and build_url.url.startswith(core + "/v1/publish/")
+                posted = await web.post(build_url.url, json={"conclusion": "success", "url": "https://ci.example/2"})
+                assert posted.status_code == 202 and posted.json()["matched"] == 1
+                via_url = await bob.expect("A CI run on a repo finished (repo acme)")  # the default text: text doesn't run
+                assert via_url["data"]["url"] == "https://ci.example/2"
+                bad = await web.post(build_url.url, json={"conclusion": 1})
+                assert bad.status_code == 400 and bad.json()["error"]["code"] == "bad_payload"
+                await wake.revoke_publish_url(build_url.id)
+                assert (await web.post(build_url.url, json={"conclusion": "success", "url": "x"})).status_code == 410
+                with pytest.raises(UsageError, match="personal"):
+                    await turn.create_publish_url({"table": "t1"})
+                p2_url = await turn.create_publish_url({"table": "t1"}, to="p2")
+                assert (await web.post(p2_url.url, json={"hole": ["8c", "8d"], "toCall": 1})).json()["matched"] == 1
+                via_turn = await p2_lines.expect("It's your move at a table (table t1)")
+                assert via_turn["data"] == {"hole": ["8c", "8d"], "toCall": 1}
+                await p1_lines.expect_nothing()
+                await wake.revoke_publish_url(p2_url.id)
+
+            # Native (a client that speaks MCP Events): events/subscribe, a webhook.
+            with receiver() as (url, secret, hook):
+                chatgpt = await connect("openai-mcp", "p3")
+                offered = sorted(t["name"] for t in (await chatgpt("tools/list", {}))["result"]["tools"])
+                assert offered == ["list_subscriptions", "unsubscribe_events"]
+                listed = (await chatgpt("events/list", {}))["result"]
+                assert sorted(e["name"] for e in listed["events"]) == ["ci.build", "game.turn"]
+                native = await chatgpt(
+                    "events/subscribe",
+                    {
+                        "name": "game.turn",
+                        "arguments": {"table": "t1"},
+                        "delivery": {"mode": "webhook", "url": url, "secret": secret},
+                        "ttlMs": 3600000,
+                    },
+                )
+                assert "result" in native, native
+                assert native["result"]["resultType"] == "complete"
+                assert native["result"]["id"].startswith("sub_")
+                await turn.emit({"table": "t1"}, {"hole": ["Qh", "Qs"], "toCall": 0}, to="p3")
+                await eventually("p3's webhook", lambda: len(hook) == 1, 15)
+                assert hook[0]["name"] == "game.turn"
+                assert hook[0]["data"] == {"hole": ["Qh", "Qs"], "toCall": 0}
+                assert "Your move: Qh Qs, 0 to call" in (hook[0]["meta"] or {}).get("ai.wakeshift/text", "")
+                # p1's turn never reaches p3's webhook.
+                await turn.emit({"table": "t1"}, {"hole": ["2c", "3c"], "toCall": 2}, to="p1")
+                await p1_lines.expect("Your move: 2c 3c, 2 to call")
+                await asyncio.sleep(0.7)
+                assert len(hook) == 1
+
+                # list_subscriptions and unsubscribe_events, by id (the native one) and by arguments (bridged).
+                mine = text_of(await tool(chatgpt, "list_subscriptions", {}))
+                found = re.search(r'- ([0-9a-f-]{36}): game\.turn \{"table":"t1"\}, delivered to 127\.0\.0\.1', mine)
+                assert found, mine
+                assert "Stopped subscription" in text_of(await tool(chatgpt, "unsubscribe_events", {"id": found.group(1)}))
+                assert "no subscriptions" in text_of(await tool(chatgpt, "list_subscriptions", {}))
+            # Without the session key (Claude Code's calls name no conversation):
+            # nothing ends, and the reply says to call again with it.
+            keyless = text_of(await tool(p2, "unsubscribe_events", {"event": "game.turn", "arguments": {"table": "t1"}}))
+            assert keyless.startswith("This conversation wasn't subscribed to game.turn"), keyless
+            assert "nothing was unsubscribed, and this conversation may still be subscribed" in keyless, keyless
+            assert p2_session not in keyless
+            stopped = await tool(
+                p2, "unsubscribe_events", {"event": "game.turn", "arguments": {"table": "t1"}, "session_key": p2_session}
+            )
+            assert "Stopped game.turn" in text_of(stopped)
+            assert (await turn.emit({"table": "t1"}, {"hole": ["9c", "9d"], "toCall": 2}, to="p2")).matched == 0
+    finally:
+        for ln in lines:
+            ln.stop()
+
+
+async def test_an_apps_own_users_against_a_real_core() -> None:
+    """The app signs its users in itself (a bearer token per user here) and
+    keeps a workspace and agent for each: a wrapped tool's subscription keeps
+    the user's conversation in that workspace, and forget_user removes it."""
+    core, key = harness()
+    wake = Wakeshift(key, core=core)
+    builds = wake.define_event(
+        "users.build",
+        description="A build of one of your repos finished",
+        args=Repo,
+        payload=Build,
+        text=lambda b, a: f"CI {b.conclusion} on {a.repo}",
+        personal=True,
+    )
+    server = MCPServer("ci-bot")
+    # The app's own sign-in: a bearer token names one of its users.
+    users: dict[str, str] = {}
+
+    def user_of(r: Request) -> str | None:
+        return users.get(r.headers.get("authorization", "").removeprefix("Bearer "))
+
+    attached = wake.attach(server, identify=lambda r: Identity(user=user_of(r)))
+
+    @attached.tool(subscribes=[builds])
+    async def watch(repo: str, call: ToolCall) -> str:
+        """Wake me when a build of a repo finishes."""
+        await call.subscribe(builds, {"repo": repo})
+        return f"Watching {repo}."
+
+    async with served(server) as (client, rpc):
+        token = secrets.token_urlsafe(16)
+        users[token] = "user-" + secrets.token_hex(6)
+        user = users[token]
+        workspace = await wake.workspace(user, "Ada")
+        assert await wake.workspace(user, "Ada") == workspace, "the same user gets the same workspace"
+        assert await wake.workspace(user + "-other", "Bob") != workspace
+
+        client.headers["Authorization"] = "Bearer " + token
+        client.headers["User-Agent"] = "claude-code/2.1.280"
+        await initialize(rpc, "claude-code")
+        res = await rpc("tools/call", {"name": "watch", "arguments": {"repo": "acme"}})
+        assert "Watching acme." in text_of(res)
+        assert await wake.workspace(user, "x") == workspace, "the subscription used another workspace"
+        assert (await builds.status({"repo": "acme"}, to=user)).subscriptions == 1
+        got = await builds.emit({"repo": "acme"}, {"conclusion": "success", "url": "https://ci.example/3"}, to=user)
+        assert got.matched == 1, got
+
+        assert await wake.forget_user(user) is True
+        assert await wake.forget_user(user) is False
+        assert await wake.forget_user(user + "-other") is True
+
+        # Wakeshift refuses a manifest that asks for Wakeshift accounts or redirect_uris: apps sign their own users in.
+        scope = [{"pattern": "app.ci-bot.ci.*", "description": "CI runs it watches"}]
+        for refused in (
+            {"accounts": "wakeshift"},
+            {"agent": {"wake": scope, "post": scope, "ttl_days": 30, "redirect_uris": ["http://127.0.0.1:8000/cb"]}},
+        ):
+            with pytest.raises(APIError) as e:
+                await wake.publish_manifest(refused)
+            assert e.value.code == "bad_manifest"
+        # With an agent scope in the manifest, the app adds its users' agents, each with a grant.
+        m = await wake.publish_manifest({"agent": {"wake": scope, "post": scope, "ttl_days": 30}})
+        assert m["agent"]["ttl_days"] == 30
+        agent = "codex"
+        ws2 = await wake.workspace("user-" + secrets.token_hex(6), "Grace")
+        assert await wake.add_agent(ws2, agent, "Codex")
+        await wake.check_agent(ws2, agent)  # the grant is live
+
+
+async def test_a_current_key_asks_wakeshift_which_app_it_is() -> None:
+    """The harness's key in the current format (wst_ and 50 characters),
+    which names no app: calls work before Wakeshift says which app it is, and
+    after."""
+    core, _ = harness()
+    with open(HARNESS) as f:
+        new_key = json.load(f)["new_key"]
+    wake = Wakeshift(new_key, core=core)
+    with pytest.raises(UsageError, match="call await wake.app"):
+        _ = wake.app_id
+    before = await wake.workspace("new-key", "New key")
+    info = await wake.app()
+    assert (info.id, info.name) == ("ci-bot", "CI bot")
+    assert wake.app_id == "ci-bot"
+    assert await wake.workspace("new-key", "New key") == before
+
+
+class Hand(BaseModel):
+    to_call: str
+
+
+class Job(BaseModel):
+    job: str
+
+
+class Pages(BaseModel):
+    pages: int
+
+
+async def test_wrapped_tools_against_a_real_core() -> None:
+    """@attached.tool() end to end (internal/coretest/sdkwrapped_test.go, in
+    Python): a tool that subscribes twice gets one block with one beacon,
+    then the short form; a failed call is rolled back; a native caller is
+    told what to subscribe to; and the app reaches the conversations it
+    stored with one multi-recipient emit."""
+    core, key = harness()
+    wake = Wakeshift(key, core=core)
+    turn = wake.define_event(
+        "game.turn",
+        description="It's your move.",
+        args=Table,
+        payload=Hand,
+        text=lambda h, a: f"Your move at {a.table}: {h.to_call} to call",
+        personal=True,
+    )
+    server = MCPServer("cards")
+    crawl = wake.define_event("crawl.finished", description="A crawl finished", args=Job, payload=Pages)
+    attached = wake.attach(server, identify=lambda r: Identity(user=r.headers.get("x-user")))
+    subs: dict[str, list[Subscription]] = {}
+
+    @attached.tool(subscribes=[turn])
+    async def join(table: str, call: ToolCall) -> str:
+        """Join a table (and the lobby): two subscribes, one block."""
+        got = [await call.subscribe(turn, {"table": t}, reason=f"Playing at {t}") for t in (table, "lobby")]
+        subs[call.user or ""] = got
+        return f"Seated at {table}."
+
+    @attached.tool(subscribes=[crawl])
+    async def start_crawl(job: str, call: ToolCall) -> str:
+        """Crawl a site: the tool subscribes to an event only the app's tools may."""
+        subs[call.user or ""] = [await call.subscribe(crawl, {"job": job}, once=True)]
+        return f"Crawl {job} started."
+
+    @attached.tool(subscribes=[turn])
+    async def fails(table: str, call: ToolCall) -> str:
+        await call.subscribe(turn, {"table": table})
+        raise ValueError("that table is full")
+
+    async def listed(user: str) -> list[dict[str, Any]]:
+        return (await wake._request_app("POST", "/event-subscriptions/list", {"user": user}))["subscriptions"]
+
+    async with served(server) as (_, rpc):
+
+        async def tool(user: str, ua: str, name: str, args: dict[str, Any], meta: dict[str, Any] | None = None) -> dict[str, Any]:
+            params: dict[str, Any] = {"name": name, "arguments": args}
+            if meta is not None:
+                params["_meta"] = meta
+            r = await rpc("tools/call", params, headers={"X-User": user, "User-Agent": ua})
+            assert "result" in r, r
+            return r["result"]
+
+        def text(r: dict[str, Any]) -> str:
+            return "\n\n".join(c.get("text", "") for c in r["content"])
+
+        codex = {
+            "io.modelcontextprotocol/clientInfo": {"name": "codex-mcp-client", "version": "0.50.0"},
+            "x-codex-turn-metadata": {"thread_id": "thread-py-1"},
+        }
+        # One block, one beacon; both subscriptions the conversation's.
+        res = await tool("ada", "codex_exec/0.50.0", "join", {"table": "oak"}, codex)
+        assert not res.get("isError") and text(res).startswith("Seated at oak.\n\n"), res
+        assert (res.get("_meta") or {}).get("wakeshift/connector"), res
+        assert text(res).count("wakeshift-beacon") <= 1
+        first = subs["ada"]
+        assert len(first) == 2 and all(s.state == "created" for s in first)
+        assert first[0].session is not None and first[0].session == first[1].session
+        assert first[0].user == "ada" and first[0].recognized.harness == "codex"
+        assert len(await listed("ada")) == 2
+        # The next call in the thread: renewals, and the short form.
+        again = await tool("ada", "codex_exec/0.50.0", "join", {"table": "oak"}, codex)
+        assert len(text(again)) < len(text(res)), (text(res), text(again))
+        assert subs["ada"][0].state == "renewed" and subs["ada"][0].id == first[0].id
+
+        # A failed call ends what it made, and its reply has no block.
+        failed = await tool("bo", "claude-code/2.1.280", "fails", {"table": "oak"})
+        assert failed["isError"] and "Wakeshift" not in text(failed)
+        assert await listed("bo") == []
+
+        # A native caller isn't subscribed: the block names what to subscribe to.
+        native = await tool("cy", "openai-mcp/1.0.0", "join", {"table": "oak"}, {"openai/session": "chat-1"})
+        for t in ("oak", "lobby"):
+            assert f'To be woken by game.turn with {{"table":"{t}"}}, subscribe to it (MCP Events).' in text(native), text(native)
+        assert subs["cy"][0].state == "native" and subs["cy"][0].id == ""
+        assert await listed("cy") == []
+
+        # An event only the app's tools may subscribe to: the tool subscribes
+        # (the core records how), an MCP Events client is told it can't, and
+        # subscribe_events and native subscribes are refused.
+        made = await tool("eve", "claude-code/2.1.280", "start_crawl", {"job": "j-py"})
+        assert not made.get("isError") and subs["eve"][0].state == "created", made
+        assert [s["event"] for s in await listed("eve")] == ["crawl.finished"]
+        gpt = await tool("fay", "openai-mcp/1.0.0", "start_crawl", {"job": "j-py"})
+        assert not gpt.get("isError"), gpt
+        if await wake._vouchers_offered():
+            # A core that hands out subscribe vouchers: the block carries one
+            # for exactly this event and these arguments.
+            assert subs["fay"][0].state == "native" and subs["fay"][0].user == "fay"
+            assert re.search(
+                r'To be woken by crawl\.finished with \{"job":"j-py"\}, subscribe to it \(MCP Events\) with wakeshift_voucher '
+                r"set to wsv_[a-z2-7]{32} in its arguments\. It works once, for these arguments\.",
+                text(gpt),
+            ), text(gpt)
+        else:
+            assert subs["fay"][0].state == "unavailable" and subs["fay"][0].reason == "client_unsupported"
+        refused = await tool(
+            "eve", "claude-code/2.1.280", "subscribe_events", {"event": "crawl.finished", "arguments": {"job": "j-py"}}
+        )
+        assert refused["isError"] and "only through this app's tools" in text(refused)
+        native_sub = await rpc(
+            "events/poll",
+            {"name": "crawl.finished", "arguments": {"job": "j-py"}},
+            headers={"X-User": "fay", "User-Agent": "openai-mcp/1.0.0"},
+        )
+        assert (
+            native_sub["error"]["message"]
+            == "crawl.finished can't be polled: it's subscribed to only through this app's tools, with a webhook or by push"
+        )
+        assert (await crawl.emit({"job": "j-py"}, {"pages": 3})).matched == 1
+
+        # One emit to the stored conversations: by subscription, a user with
+        # nothing (unmatched), and natively.
+        await tool("dee", "claude-code/2.1.280", "join", {"table": "oak"})
+        ada, dee = subs["ada"][0], subs["dee"][0]
+        got = await turn.emit(
+            {"table": "oak"},
+            {"to_call": "5"},
+            to=[
+                Recipient(user=ada.user, subscription=ada.id),
+                Recipient(user=dee.user, subscription=dee.id),
+                "nobody",
+                Recipient(native="ada"),
+            ],
+            id="py-hand-1",
+        )
+        assert got.matched == 2 and got.ended == [], got
+        assert got.unmatched == [Recipient(user="nobody"), Recipient(native="ada")], got
+        # dee's subscription ends; an emit naming it hears so, and a retry keeps it.
+        assert await turn.end(dee.user, dee.id)
+        to = [Recipient(user=dee.user, subscription=dee.id), Recipient(user=ada.user, subscription=ada.id)]
+        got = await turn.emit({"table": "oak"}, {"to_call": "10"}, to=to, id="py-hand-2")
+        assert got.matched == 1 and got.ended == [Recipient(user="dee", subscription=dee.id)], got
+        got = await turn.emit({"table": "oak"}, {"to_call": "10"}, to=to, id="py-hand-2")
+        assert got.duplicate and len(got.ended) == 1, got
+
+
+async def test_fastmcp_against_a_real_core() -> None:
+    """attach on a FastMCP 4 app (wakeshift[fastmcp]), served as FastMCP
+    serves it (http_app, stateless), with FastMCP's own bearer auth naming
+    the user: a protocol 2026-07-28 client that takes MCP tasks (Claude
+    Code's task path) discovers the server, lists the tools, gets the block
+    from a wrapped tool returning str, and is woken through wakeshift_wait
+    and tasks/get by an emit; an older client is woken through its Monitor."""
+    pytest.importorskip("fastmcp")
+    from fastmcp import FastMCP
+    from fastmcp.server.auth.providers.jwt import StaticTokenVerifier
+
+    from wakeshift._tasks import TASKS_EXTENSION, WAIT_TOOL
+    from wakeshift.fastmcp import identify_by_claim
+
+    core, key = harness()
+    wake = Wakeshift(key, core=core)
+    builds = wake.define_event(
+        "fastmcp.build",
+        description="A build of one of your repos finished",
+        args=Repo,
+        payload=Build,
+        text=lambda b, a: f"CI {b.conclusion} on {a.repo}",
+        personal=True,
+    )
+    tokens = {f"tok-{u}": {"client_id": "cli", "scopes": [], "sub": f"fm-{u}"} for u in ("ada", "bo")}
+    mcp = FastMCP("ci-bot", auth=StaticTokenVerifier(tokens=tokens))
+    attached = wake.attach(mcp, identify=identify_by_claim("sub"), builtin_tools={"wait": True})
+
+    @attached.tool(subscribes=[builds])
+    async def watch(repo: str, call: ToolCall) -> str:
+        """Wake me when a build of a repo finishes."""
+        await call.subscribe(builds, {"repo": repo})
+        return f"Watching {repo}."
+
+    app = mcp.http_app(path="/mcp", stateless_http=True, json_response=True)
+    meta = {
+        "io.modelcontextprotocol/protocolVersion": "2026-07-28",
+        "io.modelcontextprotocol/clientInfo": {"name": "claude-code", "version": "2.1.314"},
+        "io.modelcontextprotocol/clientCapabilities": {"extensions": {TASKS_EXTENSION: {}}},
+    }
+
+    def modern(method: str, name: str | None = None) -> dict[str, str]:
+        h = {"MCP-Protocol-Version": "2026-07-28", "Mcp-Method": method, "User-Agent": "claude-code/2.1.314"}
+        if name:
+            h["Mcp-Name"] = name
+        return h
+
+    monitor: Lines | None = None
+    async with app.router.lifespan_context(app):
+        async with httpx2.AsyncClient(transport=httpx2.ASGITransport(app=app), base_url="http://127.0.0.1:8000") as client:
+            ada = Rpc(client, "/mcp", headers={"Authorization": "Bearer tok-ada"})
+            d = await ada("server/discover", {"_meta": meta}, headers=modern("server/discover"))
+            assert "result" in d, d
+            r = d["result"]
+            assert r["resultType"] == "complete" and "2026-07-28" in r["supportedVersions"]
+            assert isinstance(r["ttlMs"], int) and r["cacheScope"] in ("public", "private")
+            assert r["capabilities"]["events"] == {"listChanged": False}
+            assert TASKS_EXTENSION in r["capabilities"]["extensions"]
+
+            listed = (await ada("tools/list", {"_meta": meta}, headers=modern("tools/list")))["result"]
+            assert listed["resultType"] == "complete" and isinstance(listed["ttlMs"], int)
+            assert listed["cacheScope"] == "private"
+            tools = {t["name"]: t for t in listed["tools"]}
+            assert {"watch", "subscribe_events", "unsubscribe_events", "list_subscriptions", WAIT_TOOL} <= set(tools)
+            assert set(tools["watch"]["inputSchema"]["properties"]) == {"repo", "session_key", "harness", "conversation_id"}
+            assert "outputSchema" not in tools["watch"]
+
+            res = await ada(
+                "tools/call",
+                {"name": "watch", "arguments": {"repo": "acme"}, "_meta": meta},
+                headers=modern("tools/call", "watch"),
+            )
+            assert "structuredContent" not in res["result"], res
+            text = text_of(res)
+            assert text.startswith("Watching acme.\n\n") and WAIT_TOOL in text, text
+            session = re.search(r"wsc_[a-z2-7]+", text)
+            assert session, text
+            assert (await builds.status({"repo": "acme"}, to="fm-ada")).subscriptions == 1
+
+            wait = await ada(
+                "tools/call",
+                {"name": WAIT_TOOL, "arguments": {"session_key": session.group(0)}, "_meta": meta},
+                headers=modern("tools/call", WAIT_TOOL),
+            )
+            task = wait["result"]
+            assert task["resultType"] == "task" and task["taskId"].startswith("wkt1_"), wait
+            got = await builds.emit({"repo": "acme"}, {"conclusion": "failure", "url": "https://ci.example/9"}, to="fm-ada")
+            assert got.matched == 1, got
+            done: dict[str, Any] = {}
+            for _ in range(3):  # each tasks/get is held until a message arrives (or 20 seconds)
+                done = (
+                    await ada(
+                        "tasks/get",
+                        {"taskId": task["taskId"], "_meta": meta},
+                        headers=modern("tasks/get", task["taskId"]),
+                    )
+                )["result"]
+                if done["status"] != "working":
+                    break
+            assert done["status"] == "completed", done
+            assert "CI failure on acme" in json.dumps(done["result"]), done
+
+            # An older client (no 2026-07-28, no tasks): its Monitor wakes it.
+            bo = Rpc(client, "/mcp", headers={"Authorization": "Bearer tok-bo", "User-Agent": "claude-code/2.1.280"})
+            await initialize(bo, "claude-code")
+            res = await bo("tools/call", {"name": "watch", "arguments": {"repo": "acme"}})
+            try:
+                monitor = Lines(monitor_of(res))
+                await builds.emit({"repo": "acme"}, {"conclusion": "success", "url": "https://ci.example/10"}, to="fm-bo")
+                await monitor.expect("CI success on acme")
+            finally:
+                if monitor is not None:
+                    monitor.stop()
+
+
+async def test_a_chatgpt_shaped_client_redeems_a_subscribe_voucher() -> None:
+    """A ChatGPT-shaped client against a real core with subscribe vouchers:
+    openai-mcp, a stateless server (no
+    Mcp-Session-Id), _meta["openai/session"] on tool calls, a webhook on
+    127.0.0.1. The tool's result hands out the voucher; an emit lands before
+    the subscribe and is replayed. Skipped on a core without vouchers."""
+    core, key = harness()
+    wake = Wakeshift(key, core=core)
+    subscribed: list[tuple[str | None, str, str | None]] = []
+    crawl = wake.define_event(
+        "crawl.finished",
+        description="A crawl finished",
+        args=Job,
+        payload=Pages,
+        on_subscribe=lambda s: subscribed.append((s.user, s.via, s.tool)),
+    )
+    server = MCPServer("crawler")
+    attached = wake.attach(server)
+
+    @attached.tool(subscribes=[crawl])
+    async def start_crawl(job: str, call: ToolCall) -> str:
+        await call.subscribe(crawl, {"job": job})
+        return f"Crawl {job} started."
+
+    got: list[dict[str, Any]] = []
+
+    class Hook(BaseHTTPRequestHandler):
+        def do_POST(self) -> None:
+            m = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
+            out = {"challenge": m["challenge"]} if m.get("type") == "verification" else {}
+            if m.get("name"):
+                got.append({"name": m["name"], "data": m.get("data")})
+            b = json.dumps(out).encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(b)))
+            self.end_headers()
+            self.wfile.write(b)
+
+        def log_message(self, *a: Any) -> None:
+            pass
+
+    hook = ThreadingHTTPServer(("127.0.0.1", 0), Hook)
+    threading.Thread(target=hook.serve_forever, daemon=True).start()
+    delivery = {
+        "mode": "webhook",
+        "url": f"http://127.0.0.1:{hook.server_address[1]}/hook",
+        "secret": "whsec_" + base64.b64encode(secrets.token_bytes(32)).decode(),
+    }
+    gpt = {"User-Agent": "openai-mcp/1.0.0"}
+
+    def gpt26(method: str) -> dict[str, str]:
+        # _meta names 2026-07-28, so the transport's headers say so too (the
+        # events/* checks refuse anything else).
+        return {**gpt, "MCP-Protocol-Version": "2026-07-28", "Mcp-Method": method}
+
+    meta = {
+        "io.modelcontextprotocol/protocolVersion": "2026-07-28",
+        "io.modelcontextprotocol/clientInfo": {"name": "openai-mcp", "version": "1.0.0"},
+        "io.modelcontextprotocol/clientCapabilities": {},
+    }
+
+    async def arrived(n: int) -> None:
+        for _ in range(100):
+            if len(got) >= n:
+                return
+            await asyncio.sleep(0.1)
+        raise AssertionError(f"{len(got)} deliveries, want {n}")
+
+    job = "j" + secrets.token_hex(4)
+    try:
+        async with served(server) as (_, rpc):
+            r = await rpc(
+                "tools/call",
+                {"name": "start_crawl", "arguments": {"job": job}, "_meta": {**meta, "openai/session": "chat-1"}},
+                headers=gpt,
+            )
+            assert "result" in r and not r["result"].get("isError"), r
+            if not await wake._vouchers_offered():
+                pytest.skip("the core doesn't hand out subscribe vouchers")
+            said = "\n".join(c.get("text", "") for c in r["result"]["content"])
+            m = re.search(
+                r'To be woken by crawl\.finished with \{"job":"'
+                + job
+                + r'"\}, subscribe to it \(MCP Events\) with wakeshift_voucher '
+                r"set to (wsv_[a-z2-7]{32}) in its arguments\. It works once, for these arguments\.",
+                said,
+            )
+            assert m, said
+            voucher = m.group(1)
+            assert (await crawl.emit({"job": job}, {"pages": 1})).matched == 0
+            listed = (await rpc("events/list", {"_meta": meta}, headers=gpt26("events/list")))["result"]["events"]
+            entry = next(e for e in listed if e["name"] == "crawl.finished")
+            assert entry["inputSchema"]["required"] == ["job", "wakeshift_voucher"]
+            params = {
+                "name": "crawl.finished",
+                "arguments": {"job": job, "wakeshift_voucher": voucher},
+                "delivery": delivery,
+                "ttlMs": 3600000,
+                "_meta": meta,
+            }
+            sub = await rpc("events/subscribe", params, headers=gpt26("events/subscribe"))
+            assert "result" in sub, sub
+            await arrived(1)
+            assert got[0] == {"name": "crawl.finished", "data": {"pages": 1}}
+            assert (await crawl.emit({"job": job}, {"pages": 2})).matched == 1
+            await arrived(2)
+            again = await rpc("events/subscribe", params, headers=gpt26("events/subscribe"))
+            assert again["result"]["id"] == sub["result"]["id"], again
+            other = await rpc(
+                "events/subscribe",
+                {**params, "arguments": {"job": job}, "delivery": {**delivery, "url": delivery["url"] + "2"}},
+                headers=gpt26("events/subscribe"),
+            )
+            assert other["error"]["code"] == -32012, other
+            await asyncio.sleep(0.1)
+            assert subscribed == [(None, "tool", "start_crawl")]
+            await rpc("events/unsubscribe", {**params, "_meta": meta}, headers=gpt26("events/unsubscribe"))
+    finally:
+        hook.shutdown()
+        await wake.aclose()

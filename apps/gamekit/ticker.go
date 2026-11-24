@@ -1,0 +1,406 @@
+package gamekit
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"log/slog"
+	"math/rand/v2"
+	"net/http"
+	"strings"
+	"sync"
+	"time"
+
+	"github.com/coreos/go-oidc/v3/oidc"
+	"github.com/jackc/pgx/v5"
+)
+
+// The ticker: what happens when nobody's calling. Every instance runs it
+// (Run), and Cloud Scheduler's ping (POST /tick) keeps an instance's CPU
+// on for it between players' requests. Due games are claimed with FOR
+// UPDATE SKIP LOCKED, and each step checks the deadline again under the
+// game's lock, so any number of tickers can run at once and each step
+// happens once.
+
+const (
+	tickEvery   = time.Second
+	duePerTick  = 200              // games advanced per tick, at most
+	tickWorkers = 8                // at once, per instance
+	sweepAfter  = 2 * time.Second  // times (tries² + 1): about 5 minutes over an entry's 8 tries
+	tickHold    = 55 * time.Second // how long POST /tick keeps ticking
+	tickLease   = 30 * time.Second // a claimed step another instance may take over after
+	// lastWordWait is how long a game that's over waits for its last
+	// entries to be sent before its room closes anyway (about an entry's
+	// 8 tries).
+	lastWordWait = 5 * time.Minute
+)
+
+// Run ticks until ctx is done.
+func (s *Server) Run(ctx context.Context) {
+	for {
+		if _, err := s.Tick(ctx); err != nil && ctx.Err() == nil {
+			slog.Warn(s.Name+": ticking", "err", err)
+		}
+		// A little jitter, so instances don't all query at once.
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(tickEvery + time.Duration(rand.IntN(200))*time.Millisecond):
+		}
+	}
+}
+
+// Tick advances every game whose deadline has passed, and posts
+// announcements left unposted (an instance stopped, or Wakeshift failed). It
+// reports how many games it advanced.
+func (s *Server) Tick(ctx context.Context) (int, error) {
+	now := s.now()
+	type due struct {
+		ID    string
+		Ended bool
+	}
+	// Claim them (a lease, so other instances don't do the same work), as
+	// internal/pipeline's runner does: FOR UPDATE SKIP LOCKED.
+	rows, _ := s.Store.Pool.Query(ctx, `UPDATE games SET ticking_until = $2 WHERE id IN (
+		SELECT id FROM games WHERE deadline_at <= $1 AND (ticking_until IS NULL OR ticking_until < $1)
+		ORDER BY deadline_at LIMIT $3 FOR UPDATE SKIP LOCKED)
+		RETURNING id, ended_at IS NOT NULL`, now, now.Add(tickLease), duePerTick)
+	games, err := pgx.CollectRows(rows, pgx.RowToStructByPos[due])
+	if err != nil {
+		return 0, err
+	}
+	var n int
+	var mu sync.Mutex
+	work := make(chan due)
+	var wg sync.WaitGroup
+	for range min(tickWorkers, len(games), s.tickers()) {
+		wg.Go(func() {
+			for g := range work {
+				var away map[string]bool
+				if !g.Ended {
+					away = s.Away(ctx, g.ID) // before the lock: Wakeshift isn't called under it
+				}
+				actx, cancel := context.WithTimeout(ctx, tickLease)
+				ok, err := s.advance(actx, g.ID, away)
+				cancel()
+				if err != nil {
+					slog.Warn(s.Name+": advancing a game", "game", g.ID, "err", err)
+				}
+				if ok {
+					mu.Lock()
+					n++
+					mu.Unlock()
+				}
+			}
+		})
+	}
+	for _, g := range games {
+		work <- g
+	}
+	close(work)
+	wg.Wait()
+
+	// What nobody sent: a failed emit is retried, backing off (a
+	// rate-limited one waits for its retry_at).
+	rows, _ = s.Store.Pool.Query(ctx, `SELECT DISTINCT game_id FROM room_log WHERE posted_at IS NULL AND tries < 8
+		AND at < $1::timestamptz - make_interval(secs => $2::float8 * (tries * tries + 1)) AND (retry_at IS NULL OR retry_at <= $1) LIMIT 100`, now, sweepAfter.Seconds())
+	ids, err := pgx.CollectRows(rows, pgx.RowTo[string])
+	if err != nil {
+		return n, err
+	}
+	for _, id := range ids {
+		s.deliver(ctx, id)
+	}
+	return n, s.forget(ctx, now)
+}
+
+// tickers is how many games an instance advances at once: each holds one
+// of the pool's connections, and one is left for players' moves.
+func (s *Server) tickers() int {
+	return max(1, int(s.Store.Pool.Config().MaxConns)-1)
+}
+
+// forget deletes what players have had lately (recent) once they haven't
+// played for recentFor, rooms' archive IDs unused for archiveRoomIdle
+// (archive.go), reasoning older than a day (thinking.go), joins older than
+// joinsFor (joins.go), and players' sessions idle for SessionIdle
+// (oauth.go). It runs about once an hour per instance.
+func (s *Server) forget(ctx context.Context, now time.Time) error {
+	last := s.forgotAt.Load()
+	if last != 0 && now.Sub(time.Unix(0, last)) < time.Hour || !s.forgotAt.CompareAndSwap(last, now.UnixNano()) {
+		return nil
+	}
+	if _, err := s.Store.Pool.Exec(ctx, `DELETE FROM recent WHERE updated_at < $1`, now.Add(-recentFor)); err != nil {
+		return err
+	}
+	if _, err := s.Store.Pool.Exec(ctx, `DELETE FROM archive_rooms WHERE used_at < $1`, now.Add(-archiveRoomIdle)); err != nil {
+		return err
+	}
+	if err := s.forgetThinking(ctx, now); err != nil {
+		return err
+	}
+	if err := s.forgetJoins(ctx, now); err != nil {
+		return err
+	}
+	if n, err := s.expireSessions(ctx, now, 500); err != nil {
+		return err
+	} else if n > 0 {
+		slog.Info(s.Name+": forgot idle sessions", "sessions", n)
+	}
+	return nil
+}
+
+// advance runs game id's due step, if it's still due (a player's move may
+// have moved it on): the game's Step, or for a game that's over, closing
+// its room and, later, forgetting it. It reports whether it ran one.
+func (s *Server) advance(ctx context.Context, id string, away map[string]bool) (bool, error) {
+	tx, err := s.begin(ctx)
+	if err != nil {
+		return false, err
+	}
+	defer tx.Rollback(context.WithoutCancel(ctx))
+	tx.Away = away
+	var state []byte
+	var endedAt *time.Time
+	var roomClosed bool
+	err = tx.QueryRow(ctx, `SELECT state, ended_at, room_closed FROM games
+		WHERE id = $1 AND deadline_at <= $2 FOR UPDATE`, id, tx.Now).Scan(&state, &endedAt, &roomClosed)
+	if errors.Is(err, pgx.ErrNoRows) {
+		// Not due any more. On the transaction's own connection: taking a
+		// second from the pool while holding this one can wait forever.
+		if _, err := tx.Exec(ctx, `UPDATE games SET ticking_until = NULL WHERE id = $1`, id); err != nil {
+			return false, err
+		}
+		return false, tx.Commit(ctx)
+	}
+	if err != nil {
+		return false, err
+	}
+	if _, err := tx.Exec(ctx, `UPDATE games SET ticking_until = NULL WHERE id = $1`, id); err != nil {
+		return false, err
+	}
+	switch {
+	case roomClosed: // kept a while for the follow-along page: forget it
+		if _, err := tx.Exec(ctx, `DELETE FROM games WHERE id = $1`, id); err != nil {
+			return false, err
+		}
+		return true, tx.Commit(ctx)
+	case endedAt != nil: // over: close its room, retrying until it's closed
+		var closedAt time.Time
+		if err := tx.QueryRow(ctx, `UPDATE games SET closed_at = coalesce(closed_at, $2), deadline_at = $3 WHERE id = $1 RETURNING closed_at`,
+			id, tx.Now, tx.Now.Add(closeRetry)).Scan(&closedAt); err != nil {
+			return false, err
+		}
+		if err := tx.Commit(ctx); err != nil {
+			return false, err
+		}
+		// The last word first: the players hear how the game ended before
+		// their subscriptions do. While it can't be sent, the room waits
+		// (closeRetry), for up to lastWordWait.
+		s.deliver(ctx, id)
+		if s.now().Sub(closedAt) < lastWordWait {
+			var unsent bool
+			if err := s.Store.Pool.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM room_log WHERE game_id = $1 AND posted_at IS NULL AND tries < 8)`, id).Scan(&unsent); err != nil {
+				return true, err
+			}
+			if unsent {
+				return true, nil
+			}
+		}
+		if err := s.closeRoom(ctx, id); err != nil {
+			return true, err
+		}
+		_, err := s.Store.Pool.Exec(ctx, `UPDATE games SET room_closed = true, deadline_at = greatest($2, ended_at + make_interval(secs => $3::float8)) WHERE id = $1`,
+			id, s.now(), keepEnded.Seconds())
+		return true, err
+	}
+
+	g, derr := s.decode(row{state: state})
+	if derr == nil {
+		derr = s.step(tx, g)
+	}
+	var stepErr stepError
+	switch {
+	case errors.As(derr, &stepErr):
+		slog.Error(s.Name+": a game's step failed", "game", id, "err", derr)
+		tx.Rollback(ctx) // what the step changed is discarded
+		if tx, err = s.begin(ctx); err != nil {
+			return false, err
+		}
+		defer tx.Rollback(context.WithoutCancel(ctx))
+		if err := tx.QueryRow(ctx, `SELECT id FROM games WHERE id = $1 FOR UPDATE`, id).Scan(&id); err != nil {
+			return false, err
+		}
+		if err := s.stop(tx, id, "something went wrong on our side."); err != nil {
+			return false, err
+		}
+	case derr != nil && errors.Is(derr, errDecode):
+		if err := s.stop(tx, id, unreadable); err != nil {
+			return false, err
+		}
+	case derr != nil:
+		return false, derr // the database: try again next tick
+	default:
+		if b := g.base(); !b.ended && (b.Deadline.IsZero() || !b.Deadline.After(tx.Now)) {
+			// A step must move the game on; one that didn't would run
+			// every tick.
+			slog.Error(s.Name+": a game's step didn't move it on", "game", id, "phase", b.Phase)
+			tx.Rollback(ctx)
+			return false, s.stopNow(ctx, id, "something went wrong on our side.")
+		}
+		if err := s.save(tx, g, false); err != nil {
+			return false, err
+		}
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return false, err
+	}
+	tx.Committed() // a step that failed queued nothing on this transaction
+	s.deliver(ctx, id)
+	return true, nil
+}
+
+// stopNow stops a game in a transaction of its own.
+func (s *Server) stopNow(ctx context.Context, id, reason string) error {
+	tx, err := s.begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback(context.WithoutCancel(ctx))
+	if err := tx.QueryRow(ctx, `SELECT id FROM games WHERE id = $1 FOR UPDATE`, id).Scan(&id); err != nil {
+		return err
+	}
+	if err := s.stop(tx, id, reason); err != nil {
+		return err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return err
+	}
+	s.deliver(ctx, id)
+	return nil
+}
+
+var errDecode = errors.New("gamekit: undecodable state")
+
+// unreadable is why a game whose state can't be read stops.
+const unreadable = "its saved state couldn't be read after an update on our side."
+
+// stepError is a game's Step panicking: a bug, not the database.
+type stepError struct{ v any }
+
+func (e stepError) Error() string { return fmt.Sprintf("gamekit: step panicked: %v", e.v) }
+
+// step runs the game's Step, turning a panic into a stepError.
+func (s *Server) step(tx *Tx, g State) (err error) {
+	defer func() {
+		if v := recover(); v != nil {
+			err = stepError{v}
+		}
+	}()
+	return s.Step(tx, g)
+}
+
+// closeRoom ends a game's seats once it's over: each seated conversation's
+// subscription is ended in Wakeshift unless it's seated in another open
+// game (SeatEnded). The game's closed_at is set first, so its own seats
+// don't count. A seat whose subscription can't be ended now is left to
+// lapse on its own.
+func (s *Server) closeRoom(ctx context.Context, id string) error {
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)
+	defer cancel()
+	type seat struct{ Subscriber, Subscription string }
+	rows, _ := s.Store.Pool.Query(ctx, `SELECT DISTINCT subscriber, subscription FROM seats WHERE game_id = $1 AND subscription <> ''`, id)
+	seats, err := pgx.CollectRows(rows, pgx.RowToStructByPos[seat])
+	if err != nil {
+		return err
+	}
+	for _, st := range seats {
+		s.SeatEnded(ctx, st.Subscriber, st.Subscription)
+	}
+	return nil
+}
+
+// tickRoutes serves POST /tick, Cloud Scheduler's ping: it keeps ticking
+// for most of a minute (one at a time per instance), so the instance has
+// CPU for the timers even when no player is calling.
+func (s *Server) tickRoutes(mux *http.ServeMux) {
+	if s.TickAuth == nil {
+		return
+	}
+	mux.HandleFunc("POST /tick", func(w http.ResponseWriter, r *http.Request) {
+		if err := s.TickAuth(r); err != nil {
+			http.Error(w, "not allowed", http.StatusForbidden)
+			return
+		}
+		if !s.ticking.CompareAndSwap(false, true) {
+			w.WriteHeader(http.StatusNoContent) // this instance is ticking already
+			return
+		}
+		defer s.ticking.Store(false)
+		ctx, cancel := context.WithTimeout(r.Context(), tickHold)
+		defer cancel()
+		for {
+			if _, err := s.Tick(ctx); err != nil && ctx.Err() == nil {
+				slog.Warn(s.Name+": ticking", "err", err)
+			}
+			select {
+			case <-ctx.Done():
+				w.WriteHeader(http.StatusNoContent)
+				return
+			case <-time.After(tickEvery):
+			}
+		}
+	})
+}
+
+// GoogleTickAuth accepts a ping signed by Google for account (Cloud
+// Scheduler's OIDC token, for audience: the /tick URL).
+func GoogleTickAuth(audience, account string) func(*http.Request) error {
+	var mu sync.Mutex
+	var provider *oidc.Provider
+	return tickAuth(account, func(r *http.Request) (*oidc.IDTokenVerifier, error) {
+		mu.Lock()
+		p := provider
+		mu.Unlock()
+		if p == nil {
+			var err error
+			// Kept for later key fetches, so not the request's context; a
+			// client with a timeout, so a hung Google doesn't hang /tick.
+			ctx := oidc.ClientContext(context.WithoutCancel(r.Context()), &http.Client{Timeout: 10 * time.Second})
+			if p, err = oidc.NewProvider(ctx, "https://accounts.google.com"); err != nil {
+				return nil, err
+			}
+			mu.Lock()
+			provider = p
+			mu.Unlock()
+		}
+		return p.Verifier(&oidc.Config{ClientID: audience}), nil
+	})
+}
+
+// tickAuth accepts a bearer token that verifier's verifier accepts, for
+// account's verified email. An empty account accepts nothing.
+func tickAuth(account string, verifier func(*http.Request) (*oidc.IDTokenVerifier, error)) func(*http.Request) error {
+	return func(r *http.Request) error {
+		token, ok := strings.CutPrefix(r.Header.Get("Authorization"), "Bearer ")
+		if !ok || account == "" {
+			return errors.New("no token")
+		}
+		v, err := verifier(r)
+		if err != nil {
+			return err
+		}
+		idt, err := v.Verify(r.Context(), token)
+		if err != nil {
+			return err
+		}
+		var claims struct {
+			Email    string `json:"email"`
+			Verified bool   `json:"email_verified"`
+		}
+		if err := idt.Claims(&claims); err != nil || !claims.Verified || claims.Email != account {
+			return errors.New("not signed by the expected service account")
+		}
+		return nil
+	}
+}

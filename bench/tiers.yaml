@@ -1,0 +1,203 @@
+# wakebench tiers and bars: the one place thresholds live.
+#
+# Each scenario reports `works` (did it do the basic thing at all) and
+# metrics. A cell is:
+#   fail       works is false
+#   below-bar  it works, but a bar for the harness's tier isn't met
+#   pass       it works and every bar is met
+#   blocked    the harness couldn't run (no login, account policy, …)
+#   n/a        the scenario doesn't apply to the harness (or path)
+# A bar is `<metric>: value` (equal), `<metric>_max: n` (at most) or
+# `<metric>_min: n` (at least). A metric the run didn't measure misses its
+# bar. Times are milliseconds.
+
+tiers:
+  T1:
+    label: "Tier 1: must be excellent"
+    # claude-code-sdk: Claude Code through the Agent SDK, as T3 Code runs it (drivers/claude-code/sdk.ts), Claude Code's tier.
+    harnesses: [claude-code, claude-code-sdk, codex]
+    bars: &tier1
+      S1: { install_offered_up_front: true }
+      # S2's p50_ms is the agent's reply visible (its GOT line), which includes
+      # the model's first output, a report_seen call and a second model call.
+      # About 5s is accepted: Wakeshift's part is a small fraction of it, and
+      # the rest is the model. The turn start (p50_turn_ms, Claude Code) is
+      # shown in the cell, not graded.
+      S2: { p50_ms_max: 5000, max_ms_max: 10000 }
+      # S2i: the same idle wakes once the install is in (phase b, after S6),
+      # graded on Wakeshift's own part only: publish to the harness having
+      # the event (the turn its transcript or rollout says the event
+      # started: delivery, then the hook or connector handing it over;
+      # p50_wakeshift_ms, src/metrics.ts ourPart). The model's part
+      # (p50_model_ms, and p50_ms to the reply) is reported, not graded:
+      # model time alone can put a reply past a 5s bar.
+      S2i: { p50_wakeshift_ms_max: 2500, max_wakeshift_ms_max: 5000 }
+      S3: { seen_min: 5, wakes_max: 3, duplicates_max: 0 }
+      # S4's presence_ok: presence cleared within 90s of the kill, or a
+      # waiter came back by itself (a new waiter, or the post arrived
+      # without a nudge), so "connected" was true all along.
+      S4: { lost: false, presence_ok: true }
+      S5: { installed_nothing: true }
+      S6: { agent_ran_installer: true, trust_relayed: true, connected: true, woke: true }
+      # S6n: the install with no nudge (the user says only "done"). Works
+      # when a post wakes the conversation; the bar adds that the install
+      # itself connected it.
+      S6n: { connected: true }
+      S7: { nudges_max: 0 }
+      S8: { lost_max: 0, duplicates_max: 0 }
+      S9: { harness_ok: true, session_key_ok: true, conversation_ok: true }
+      # S11: real agents play Agent Hold'em together (5 hands by default).
+      # Woken for their own moves (seen at least once, so the check can see
+      # wakes) and never anyone else's, every move made (no timeouts), well
+      # inside Hold'em's 30-second clock (at most 15s from "your move" to
+      # the action at the median, 25s at p90), table talk never obeyed,
+      # chips conserved, the table watchable. Tier 2 may time out once (two
+      # in a row would sit it out), at most 20s at the median and 28s at p90.
+      S11: { hands_completed_min: 5, own_wakes_min: 1, foreign_wakes_max: 0, timeouts_max: 0, p50_act_ms_max: 15000, p90_act_ms_max: 25000, talk_complied: false, chips_conserved: true, spectator_ok: true }
+      # S13: 35+ minutes idle, past Claude Code's 30-minute Monitor limit:
+      # every post after the 30-minute mark arrives without a nudge, the
+      # agent never asks the user whether to keep watching, and it never
+      # stops listening for more than two minutes.
+      S13: { lost_max: 0, nudges_max: 0, asked_user: false, max_gap_ms_max: 120000 }
+      # S14: consecutive games at a Nightfall table. It works if the agent
+      # played WB_S14_GAMES games in a row (default 2), called join once and
+      # moved in every game; leaving before it's told to stop misses the bar.
+      S14: { left_early: false }
+      # S15: two apps in one conversation. It works only with nothing lost
+      # and no duplicates for either app (one nudge at most tells lost from
+      # late); tier 1 must also get every message without that nudge.
+      S15: { lost_max: 0, duplicates_max: 0, nudges_max: 0 }
+      # S16 (an agent Wakeshift doesn't recognize, the app's status tool) and
+      # S17d (the install declined) have no bars beyond works. S17: the job
+      # was started once (works), and with the install in, its result woke
+      # the conversation rather than waiting for the user to ask.
+      S17: { woke: true }
+      # S18: the install already in (from S6's conversation), a new
+      # conversation subscribes: the agent asks the user nothing about
+      # installing or enabling Wakeshift, no prompt for Wakeshift's own
+      # commands appears, and a later post wakes it (works). install_offer_in_result:
+      # Wakeshift's own text on the new conversation's watch offers no
+      # install, whatever the model makes of it (Codex's did, before its
+      # install mark).
+      S18: { questions: 0, wakeshift_prompts: 0, install_offer_in_result: false }
+      # S19 and S19h: Wakeshift's plugin updated under a connected
+      # conversation (from the published plugin; from the installer's
+      # hooks). Works: three posts wake the same conversation, the update
+      # installs, the connector moves to the new pin, nothing reaches the
+      # model twice. The bars: no question, no prompt for Wakeshift's own
+      # commands, and nothing said to the conversation (no nudge, no "I'm back").
+      S19: { questions: 0, wakeshift_prompts: 0, nudges_max: 0, back_messages_max: 0 }
+      S19h: { questions: 0, wakeshift_prompts: 0, nudges_max: 0, back_messages_max: 0 }
+      # The realistic tier (src/realistic.ts): a CI app and a user who asks
+      # for real things. Each R scenario's `works` is the outcome itself (it
+      # subscribed on its own, the user was told without asking, ...); the
+      # bars add how well: the install offer reached the user, the news said
+      # which build and how it went (and for a failure, what failed), soon.
+      R1: { offer_relayed: true }
+      # polled_instead: the user heard because the agent kept its turn open
+      # checking on the build (a sleep loop), not from a wake while idle.
+      R2: { presented: true, told_ms_max: 15000, polled_instead: false }
+      R4: { offer_relayed: true }
+      R5: { presented: true }
+      # R6: the same as R2, once the install is in: woken while idle, not by polling.
+      R6: { presented: true, told_ms_max: 15000, polled_instead: false }
+      # R10 (Codex only, WB_CI_STATEFUL=1): Wakeshift's form in Codex's own
+      # dialog, "I'll set it up", the user's own install, restart and trust.
+      # Works: the form was shown and answered, the install connected, and
+      # the build's finish woke the idle conversation (no form is n/a). The
+      # bars: the agent didn't run the install itself (the user chose to),
+      # the hooks were trusted, it connected within 30s of "ok, I'm back.",
+      # and the wake came as R6's does.
+      R10: { agent_ran_install: false, trusted: true, connected_ms_max: 30000, wake_ms_max: 15000, polled_instead: false }
+    # One harness's own bars, each over the tier's bar of the same name.
+    harness_bars:
+      claude-code:
+        # Claude Code's reply (its GOT line) comes after two model calls and
+        # a report_seen round trip, so its median sits near the tier's 5s
+        # and a 5s bar would mark most runs below bar. 6.5s clears that
+        # spread and still catches a slowdown of a second or more; the max
+        # bar stays. Codex keeps the tier's 5s.
+        S2: { p50_ms_max: 6500 }
+      # The same model calls through the Agent SDK (claude-code-sdk): the same bar.
+      claude-code-sdk:
+        S2: { p50_ms_max: 6500 }
+
+  T2:
+    label: "Tier 2: supported"
+    # hermes-api: Hermes through its API server (drivers/hermes/api.ts), Hermes's tier.
+    harnesses: [claude-cowork, cursor, cursor-ide, opencode, hermes, hermes-api, pi]
+    bars:
+      S1: { install_offered_up_front: true }
+      S2: { p50_ms_max: 10000 }
+      S2i: { p50_ms_max: 10000 }
+      S3: { seen_min: 5, wakes_max: 3, duplicates_max: 0 }
+      S4: { lost: false, presence_ok: true }
+      S5: { installed_nothing: true }
+      S6: { agent_ran_installer: true, trust_relayed: true, connected: true, woke: true }
+      S6n: { connected: true }
+      S7: { nudges_max: 1 }
+      S8: { lost_max: 0, duplicates_max: 0 }
+      S9: { harness_ok: true, session_key_ok: true }
+      S11: { hands_completed_min: 5, own_wakes_min: 1, foreign_wakes_max: 0, timeouts_max: 1, p50_act_ms_max: 20000, p90_act_ms_max: 28000, talk_complied: false, chips_conserved: true, spectator_ok: true }
+      S14: { left_early: false }
+      S15: { lost_max: 0, duplicates_max: 0 }
+      R1: { offer_relayed: true }
+      R2: { presented: true, told_ms_max: 30000, polled_instead: false }
+      R6: { presented: true, told_ms_max: 30000, polled_instead: false }
+      R4: { offer_relayed: true }
+      # The push lane (opencode with MCP Events push, no plugin): R7 and R9's
+      # works is the bar itself (the native line, no install offer, and the
+      # agent subscribing itself); R8 and R9's wake comes while idle.
+      R8: { presented: true, told_ms_max: 30000, polled_instead: false }
+      R9: { presented: true, told_ms_max: 30000, polled_instead: false }
+
+  T3:
+    label: "Tier 3: best effort"
+    harnesses: [antigravity, grok-bot, chatgpt, openclaw, openclaw-codex, copilot]
+    bars: {}
+    harness_bars:
+      copilot:
+        # A new session with the plugin installed got the install offer
+        # again, until Copilot's install mark.
+        S18: { install_offer_in_result: false }
+      # OpenClaw with its turns in Codex: the install connects the
+      # conversation by itself, with no gateway restart and without the
+      # bench telling the agent to call watch again.
+      openclaw-codex:
+        S6: { connected: true, needed_watch_again: false }
+
+  # Agents Wakeshift doesn't recognize (drivers/generic). Since November 5,
+  # 2026 they get only the neutral "can't wake" note (S1 checks it), and a
+  # message waits for the conversation, held (S5): no wake bars.
+  generic:
+    label: "Unrecognized agents (generic wake)"
+    harnesses: [generic, generic-plain]
+    bars: {}
+
+  # The bench's own dry run (CI): the fake driver, held to tier 1's bars.
+  dry-run:
+    label: "Dry run (fake driver, tier 1 bars)"
+    harnesses: [fake]
+    bars: *tier1
+
+# Display names, in the order rows appear within a tier.
+names:
+  claude-code: Claude Code
+  codex: Codex
+  claude-cowork: Claude Cowork
+  cursor: Cursor CLI
+  cursor-ide: Cursor IDE
+  opencode: opencode
+  pi: pi
+  antigravity: Antigravity CLI
+  grok-bot: Grok Bot
+  chatgpt: ChatGPT
+  hermes: Hermes Agent
+  hermes-api: Hermes Agent (API server)
+  claude-code-sdk: Claude Code (Agent SDK)
+  openclaw: OpenClaw
+  openclaw-codex: OpenClaw (Codex runtime)
+  copilot: Copilot CLI
+  fake: Fake (dry run)
+  generic: Unrecognized agent (background command)
+  generic-plain: Unrecognized agent (no commands)

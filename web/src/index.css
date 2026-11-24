@@ -1,0 +1,89 @@
+/* Classes come from the app's own files only (Tailwind 3's `content`). */
+@import 'tailwindcss' source(none);
+@source '../index.html';
+@source '.';
+
+/* The marketing site's "Morning Paper" palette and type
+   (site/static/site.css), as theme tokens: bg-paper, text-ink-3, font-serif
+   and so on. */
+@theme {
+  --color-paper: #f5f1e8;
+  --color-paper-2: #ede7da;
+  --color-card: #fffdf8;
+  --color-ink: #1d1b17;
+  --color-ink-2: #4a463e;
+  --color-ink-3: #6b665b; /* 4.6:1 or more on paper, paper-2 and card */
+  --color-rule: #ddd5c4;
+  /* accent is for fills, marks and display type; accent-text is the accent
+     as body-size text: 5.2:1 on paper, where accent is 4.07:1. */
+  --color-accent: #c25418;
+  --color-accent-text: #a9460f;
+  --color-accent-soft: #f6e2d3;
+  --color-sage: #3e6b55;
+  --color-sage-soft: #dfebe2;
+  --color-caution: #9a5b00;
+  --color-caution-bg: #fbf0d9;
+  --color-caution-rule: #e9c98a;
+  --color-danger: #b4372b; /* the landing page's red (site/static/landing.css) */
+
+  --font-serif: 'Iowan Old Style', Charter, 'Palatino Linotype', Palatino, Georgia, serif;
+  --font-sans: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Helvetica Neue', Arial, sans-serif;
+  --font-mono: ui-monospace, 'SF Mono', Menlo, Consolas, monospace;
+
+  /* Line heights in rem, as in Tailwind 3. Tailwind 4's are ratios, which
+     children in another size inherit and scale: a text-[13px] button in a
+     text-sm row would come out shorter. */
+  --text-xs--line-height: 1rem;
+  --text-sm--line-height: 1.25rem;
+  --text-base--line-height: 1.5rem;
+  --text-lg--line-height: 1.75rem;
+  --text-xl--line-height: 1.75rem;
+  --text-2xl--line-height: 2rem;
+  --text-3xl--line-height: 2.25rem;
+}
+
+@layer base {
+  :root {
+    color-scheme: light;
+  }
+
+  /* Tailwind 4's defaults are a border in currentColor and an arrow cursor
+     on buttons; the console's are a rule-colored border and a pointer. */
+  *,
+  ::after,
+  ::before,
+  ::backdrop,
+  ::file-selector-button {
+    border-color: var(--color-rule);
+  }
+
+  button:not(:disabled),
+  [role='button']:not(:disabled) {
+    cursor: pointer;
+  }
+
+  body {
+    @apply bg-paper font-sans text-ink antialiased;
+  }
+
+  code {
+    @apply font-mono text-[0.9em];
+  }
+
+  :focus-visible {
+    outline: 2px solid var(--color-accent);
+    outline-offset: 3px;
+  }
+
+  /* The drawer's slide and color fades: instant for people who ask for less motion. */
+  @media (prefers-reduced-motion: reduce) {
+    *,
+    *::before,
+    *::after {
+      transition-duration: 0.01ms !important;
+      animation-duration: 0.01ms !important;
+      animation-iteration-count: 1 !important;
+      scroll-behavior: auto !important;
+    }
+  }
+}

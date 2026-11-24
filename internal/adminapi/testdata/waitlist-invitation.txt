@@ -1,0 +1,19 @@
+YOU'RE OFF THE WAITLIST
+Your Wakeshift account is ready
+===============================
+
+Hi Ada Lovelace,
+
+Thanks for waiting. Sign in with the Google account you joined the waitlist with and you're in.
+
+Start with the quickstart at wakeshift.ai/docs/quickstart. In about five minutes, your MCP server offers an event, an agent subscribes to it, and the agent wakes up when the event fires.
+
+Sign in to Wakeshift:
+https://app.wakeshift.ai/
+
+You sign in through Google. Wakeshift never asks for your password.
+
+-- 
+You're getting this email because you joined the Wakeshift waitlist.
+Sent by Wakeshift (Clawvisor Inc.)
+Questions? Write to support@wakeshift.ai.

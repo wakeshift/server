@@ -1,0 +1,313 @@
+package connector
+
+import (
+	"encoding/json"
+	"errors"
+	"fmt"
+	"io"
+	"os"
+	"path/filepath"
+	"strings"
+	"time"
+)
+
+// GitHub Copilot CLI (1.0.98, verified). User hooks are
+// files in ~/.copilot/hooks/ ($COPILOT_HOME/hooks), run with no prompt;
+// camelCase inputs carry sessionId but no event name (the command says
+// which). Copilot drops an MCP result's _meta, but its preMcpToolCall hook
+// sets the outgoing _meta, so:
+//
+//   - preMcpToolCall: add _meta["wakeshift/conversation"] = the server's
+//     own name for the session (servernames.go: never the session ID
+//     itself), merged into what earlier hooks set, so an app knows the
+//     session and its beacon can name it; and record which server the call
+//     went to.
+//   - postToolUse: the beacon comes in the result's text (BeaconText);
+//     acted on only if the result is a recorded call's (its server known),
+//     bound to that server's name for the session, and the server is
+//     pinned to the beacon's app (Pins); verify and redeem it, take it out
+//     of the text the model sees (modifiedResult), and say "connected"
+//     (additionalContext).
+//   - agentStop: if messages are waiting, {"decision":"block","reason":…}
+//     continues the session (at most 8 in a row). It waits only briefly:
+//     what the user types queues behind a waiting stop hook.
+//   - sessionStart (the plugin's, and the installer's file since this
+//     connector): adds the mark (internal/pluginmark) for the model to pass
+//     as the harness argument of an app's tools (additionalContext, which
+//     Copilot 1.0.107 adds to the model's context before its first turn),
+//     so the subscribing result offers no install and no shell loop.
+//   - permissionRequest (matcher "bash"): before Copilot asks the user to
+//     approve a shell command, {"behavior":"allow"} if it's exactly
+//     Wakeshift's wait command (Hook.approve), so the command that wakes
+//     an idle session doesn't ask once per wake. Copilot has no allowlist
+//     a user's config can hold for every folder (its persisted approvals
+//     are per location), so the hook is the rule. Nothing else is
+//     answered: Copilot asks as it would have. The hook respects the
+//     user's own deny rules itself: it gives no answer while the user
+//     denies the command, or shell commands, or while it can't tell
+//     whether they do (copilotdeny.go).
+
+const copilotName = "copilot"
+
+// CopilotConversationMeta is the tools/call _meta key the hook adds.
+const CopilotConversationMeta = "wakeshift/conversation"
+
+func init() {
+	register(Spec{Name: copilotName, Format: copilotFormat{}, Installer: copilotInstaller{},
+		When:     "when the agent finishes a turn; while it's idle, they wait for the next one",
+		StopWait: 5 * time.Second,
+		// No Rule: Copilot CLI has no global allowlist for commands
+		// (docs/harnesses.md, "Pre-approving Wakeshift's commands"); its
+		// permissionRequest hook approves the wait command instead.
+		Wait: true, RecordProcs: true,
+	})
+}
+
+type copilotFormat struct{}
+
+type copilotInput struct {
+	SessionID      string          `json:"sessionId"`
+	ServerName     string          `json:"serverName"`
+	ToolCallID     string          `json:"toolCallId"`
+	ToolName       string          `json:"toolName"`
+	Meta           json.RawMessage `json:"_meta"`
+	StopHookActive bool            `json:"stop_hook_active"`
+	ToolInput      struct {
+		Command string `json:"command"`
+	} `json:"toolInput"`
+	ToolResult struct {
+		ResultType       string `json:"resultType"`
+		TextResultForLlm string `json:"textResultForLlm"`
+	} `json:"toolResult"`
+}
+
+func (f copilotFormat) Parse(b []byte) (Input, error) { return f.ParseEvent("", b) }
+
+func (copilotFormat) ParseEvent(event string, b []byte) (Input, error) {
+	var c copilotInput
+	if err := json.Unmarshal(b, &c); err != nil {
+		return Input{}, err
+	}
+	in := Input{Conversation: c.SessionID, Continued: c.StopHookActive, raw: b}
+	switch event {
+	case CopilotSessionStartEvent:
+		in.Event = SessionContext
+	case "preMcpToolCall":
+		in.Event, in.Server, in.ToolName, in.ToolCallID = PreCall, c.ServerName, c.ToolName, c.ToolCallID
+	case "postToolUse":
+		in.Event, in.ToolName, in.ToolCallID = ToolResult, c.ToolName, c.ToolCallID
+		in.ToolResult, _ = json.Marshal(c.ToolResult.TextResultForLlm)
+	case "agentStop":
+		in.Event = Stop
+	case "permissionRequest":
+		in.Event, in.ToolName, in.Command = Approve, c.ToolName, c.ToolInput.Command
+	}
+	return in, nil
+}
+
+// CopilotSessionStartEvent is the --event of the sessionStart hook, which
+// adds the mark's context (SessionContext).
+const CopilotSessionStartEvent = "sessionStart"
+
+// CopilotMarkNote is the context the plugin's sessionStart hook adds, with
+// the mark (%s) to pass.
+const CopilotMarkNote = "Wakeshift's plugin is installed in this GitHub Copilot CLI session, so apps that notify through Wakeshift can wake this conversation, even while it's idle, through Wakeshift's wait command, which the plugin approves: whenever that command finishes and you've acted on what it printed, run it again the same way. " +
+	"When you call an app's tool that takes a `harness` argument, pass harness=%q (exactly this): it tells the app the plugin is here, so its result won't ask you to set notifications up."
+
+// CopilotHooksMarkNote is CopilotMarkNote for the hooks Wakeshift's
+// installer wrote (~/.copilot/hooks/wakeshift.json, no plugin).
+const CopilotHooksMarkNote = "Wakeshift's hooks are installed in this GitHub Copilot CLI session, so apps that notify through Wakeshift can wake this conversation, even while it's idle, through Wakeshift's wait command, which the hooks approve: whenever that command finishes and you've acted on what it printed, run it again the same way. " +
+	"When you call an app's tool that takes a `harness` argument, pass harness=%q (exactly this): it tells the app the hooks are here, so its result won't ask you to set notifications up."
+
+// SessionContext is sessionStart's output that adds the mark's note (the
+// hooks' wording when hooks), if there's a mark.
+func (copilotFormat) SessionContext(mark string, hooks bool) (Output, bool) {
+	if mark == "" {
+		return Output{}, false
+	}
+	note := CopilotMarkNote
+	if hooks {
+		note = CopilotHooksMarkNote
+	}
+	b, err := json.Marshal(map[string]any{"additionalContext": fmt.Sprintf(note, mark)})
+	if err != nil {
+		return Output{}, false
+	}
+	return Output{Stdout: append(b, '\n')}, true
+}
+
+// MarkNeedsWait: the marked result has the agent run the wait command the
+// connected note gives (WaitMarkFormat).
+func (copilotFormat) MarkNeedsWait() bool { return true }
+
+// Shell: Copilot's shell tool is "bash" (also on Windows, where it runs
+// PowerShell, which the wait command isn't offered for).
+func (copilotFormat) Shell(tool string) bool { return tool == "bash" }
+
+// Approve is permissionRequest's answer that approves the call.
+func (copilotFormat) Approve() Output { return Output{Stdout: []byte(`{"behavior":"allow"}` + "\n")} }
+
+// Denied: the user's --deny-tool rules or their organization's managed
+// rules cover the command, or they can't be read (copilotdeny.go).
+func (copilotFormat) Denied(command string) bool {
+	denied, _ := copilotDeniesWait(command)
+	return denied
+}
+
+// Aliased: each MCP server is told its own name for the session.
+func (copilotFormat) Aliased() bool { return true }
+
+// ResultOf: a result answers the recorded call with its ID, or (Copilot's
+// postToolUse input has none) whose server and tool make its tool name.
+func (copilotFormat) ResultOf(in Input, c mcpCall) bool {
+	if in.ToolCallID != "" && c.Call != "" {
+		return in.ToolCallID == c.Call
+	}
+	return c.Server != "" && in.ToolName == c.Server+"-"+c.Tool
+}
+
+// PreCall adds the server's name for the session to the call's outgoing
+// _meta, keeping what earlier hooks set (Copilot takes the last hook's
+// answer whole).
+func (copilotFormat) PreCall(in Input) (Output, bool) {
+	if in.ServerConversation == "" {
+		return Output{}, false
+	}
+	var c copilotInput
+	json.Unmarshal(in.raw, &c)
+	meta := map[string]any{}
+	json.Unmarshal(c.Meta, &meta)
+	meta[CopilotConversationMeta] = in.ServerConversation
+	b, _ := json.Marshal(map[string]any{"metaToUse": meta})
+	return Output{Stdout: append(b, '\n')}, true
+}
+
+// Context adds text after the result, and takes the beacon line out of the
+// result the model sees.
+func (f copilotFormat) Context(in Input, text string) (Output, bool) {
+	out := map[string]any{}
+	if text != "" {
+		out["additionalContext"] = text
+	}
+	if r, ok := f.stripped(in); ok {
+		out["modifiedResult"] = r
+	}
+	if len(out) == 0 {
+		return Output{}, false
+	}
+	b, _ := json.Marshal(out)
+	return Output{Stdout: append(b, '\n')}, true
+}
+
+// Strip takes the beacon out of the result the model sees, saying nothing
+// else (for a beacon the hook didn't act on).
+func (f copilotFormat) Strip(in Input) (Output, bool) { return f.Context(in, "") }
+
+func (copilotFormat) stripped(in Input) (map[string]any, bool) {
+	var c copilotInput
+	if json.Unmarshal(in.raw, &c) != nil || in.Event != ToolResult {
+		return nil, false
+	}
+	text := StripBeaconText(c.ToolResult.TextResultForLlm)
+	if text == c.ToolResult.TextResultForLlm {
+		return nil, false
+	}
+	rt := c.ToolResult.ResultType
+	if rt == "" {
+		rt = "success"
+	}
+	return map[string]any{"resultType": rt, "textResultForLlm": text}, true
+}
+
+func (copilotFormat) Continue(in Input, text string) (Output, bool) {
+	b, _ := json.Marshal(map[string]any{"decision": "block", "reason": text})
+	return Output{Stdout: append(b, '\n')}, true
+}
+
+// CopilotHome is Copilot CLI's config directory (COPILOT_HOME, default
+// ~/.copilot).
+func CopilotHome() string {
+	if d := os.Getenv("COPILOT_HOME"); d != "" {
+		return d
+	}
+	home, _ := os.UserHomeDir()
+	return filepath.Join(home, ".copilot")
+}
+
+type copilotInstaller struct{}
+
+func (copilotInstaller) path() string { return filepath.Join(CopilotHome(), "hooks", "wakeshift.json") }
+
+func (copilotInstaller) file(bin string) []byte {
+	cmd := func(event string, timeout int) []any {
+		return []any{map[string]any{"type": "command", "bash": HookCommand(bin, copilotName, "--event", event), "timeoutSec": timeout}}
+	}
+	approve := cmd("permissionRequest", 5)
+	approve[0].(map[string]any)["matcher"] = "bash"
+	b, _ := json.MarshalIndent(map[string]any{"version": 1, "hooks": map[string]any{
+		"sessionStart":      cmd(CopilotSessionStartEvent, 10),
+		"preMcpToolCall":    cmd("preMcpToolCall", 5),
+		"postToolUse":       cmd("postToolUse", 20),
+		"agentStop":         cmd("agentStop", 15),
+		"permissionRequest": approve,
+	}}, "", "  ")
+	return append(b, '\n')
+}
+
+// Install writes Wakeshift's own hooks file (nothing of anyone else's is
+// edited).
+func (i copilotInstaller) Install(bin string, out io.Writer) error {
+	return writeOwnFile(i.path(), i.file(bin), out, "hooks file")
+}
+
+func (i copilotInstaller) Uninstall(bin string, out io.Writer) error {
+	return removeOwnFile(i.path(), "--harness "+copilotName, out, "hooks file")
+}
+
+// writeOwnFile writes a file that's Wakeshift's alone (backing up anything
+// different already there).
+func writeOwnFile(path string, want []byte, out io.Writer, what string) error {
+	if old, err := os.ReadFile(path); err == nil && string(old) == string(want) {
+		fmt.Fprintf(out, "Wakeshift's %s was already at %s.\n", what, path)
+		return nil
+	}
+	backup, err := Backup(path)
+	if err != nil {
+		return err
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		return err
+	}
+	if err := os.WriteFile(path, want, 0o600); err != nil {
+		return err
+	}
+	if backup != "" {
+		fmt.Fprintf(out, "Wrote Wakeshift's %s to %s (the previous file is at %s).\n", what, path, backup)
+	} else {
+		fmt.Fprintf(out, "Wrote Wakeshift's %s to %s.\n", what, path)
+	}
+	return nil
+}
+
+// removeOwnFile removes a file Wakeshift wrote (one containing marker).
+func removeOwnFile(path, marker string, out io.Writer, what string) error {
+	b, err := os.ReadFile(path)
+	if errors.Is(err, os.ErrNotExist) {
+		fmt.Fprintf(out, "Wakeshift's %s wasn't at %s.\n", what, path)
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	if !strings.Contains(string(b), marker) {
+		return fmt.Errorf("%s isn't Wakeshift's; left it alone", path)
+	}
+	if err := os.Remove(path); err != nil {
+		return err
+	}
+	fmt.Fprintf(out, "Removed Wakeshift's %s, %s.\n", what, path)
+	return nil
+}
+
+// TextOnly: its hooks get a result's text (textResultForLlm), never _meta.
+func (copilotFormat) TextOnly() bool { return true }

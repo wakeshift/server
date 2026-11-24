@@ -1,0 +1,34 @@
+{
+  "name": "@wakeshift/wakebench",
+  "version": "0.1.0",
+  "description": "wakebench: a repeatable cross-harness test bench for Wakeshift.",
+  "license": "Apache-2.0",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=26"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "lint": "tsc -p tsconfig.json --noEmit",
+    "test": "tsc -p tsconfig.json && node --test 'dist/test/*.test.js'",
+    "dry-run": "tsc -p tsconfig.json && node dist/src/cli.js --harness fake --target fake --scenarios S1-S9 --out-root \"${TMPDIR:-/tmp}/wakebench-dry\""
+  },
+  "dependencies": {
+    "@anthropic-ai/sdk": "1.6.0",
+    "@mastra/core": "1.81.0",
+    "@mastra/mcp": "2.7.0",
+    "@modelcontextprotocol/client": "^2.4.0",
+    "@modelcontextprotocol/node": "^2.1.2",
+    "@modelcontextprotocol/server": "^2.4.0",
+    "@wakeshift/sdk": "file:../sdk/typescript",
+    "pg": "^8.23.1",
+    "yaml": "^2.8.1",
+    "zod": "^4.6.7"
+  },
+  "devDependencies": {
+    "@types/node": "^26.6.6",
+    "@types/pg": "^8.23.1",
+    "typescript": "^5.9.3"
+  }
+}

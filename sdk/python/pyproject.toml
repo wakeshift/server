@@ -1,0 +1,90 @@
+[project]
+name = "wakeshift"
+version = "0.10.1"
+description = "Wakeshift lets an MCP server wake the AI agents that use it. The Python SDK: define events, serve them as MCP Events, and emit them."
+readme = "README.md"
+license = "Apache-2.0"
+license-files = ["LICENSE", "NOTICE"]
+requires-python = ">=3.11"
+authors = [{ name = "Clawvisor Inc.", email = "support@wakeshift.ai" }]
+keywords = ["mcp", "model-context-protocol", "mcp-events", "ai-agents", "agents", "claude-code", "codex", "cursor", "events", "webhooks", "notifications", "fastmcp", "wakeshift"]
+classifiers = [
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3 :: Only",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Programming Language :: Python :: 3.13",
+  "Programming Language :: Python :: 3.14",
+  "Development Status :: 3 - Alpha",
+  "Intended Audience :: Developers",
+  "Operating System :: OS Independent",
+  "Framework :: AsyncIO",
+  "Topic :: Software Development :: Libraries :: Python Modules",
+  "Typing :: Typed",
+]
+dependencies = [
+  "mcp-types>=2.3,<3",
+  "httpx2>=2.10",
+  "cryptography>=42",
+  "pydantic>=2.12",
+  "typing-extensions>=4.13",
+]
+
+[project.optional-dependencies]
+# attach on the official MCP Python SDK (MCPServer, the low-level Server).
+mcp = ["mcp>=2.3,<3"]
+# attach on FastMCP 4, which sits on mcp 2.x. FastMCP 2.12+ and 3.x sit on
+# mcp 1.x: install plain wakeshift beside them (attach works; native MCP
+# Events need FastMCP 4).
+fastmcp = ["fastmcp>=4.1,<5"]
+
+[project.urls]
+Homepage = "https://wakeshift.ai"
+Documentation = "https://wakeshift.ai/docs"
+Source = "https://github.com/wakeshift/wakeshift-python"
+Issues = "https://github.com/wakeshift/wakeshift-python/issues"
+
+[dependency-groups]
+dev = [
+    "mcp>=2.3,<3",
+    "pytest>=8",
+    "pytest-asyncio>=0.24",
+    "uvicorn>=0.30",
+    "ruff>=0.6",
+    "pyright>=1.1.380",
+    "fastmcp>=4.1,<5",
+    "sentry-sdk>=2.74.0",
+    "rich>=15.0.0",
+    "mypy>=2.4.1",
+]
+
+[build-system]
+requires = ["hatchling>=1.25"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.sdist]
+exclude = ["/tests", "/scripts", "/uv.lock"]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/wakeshift"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+markers = ["e2e: runs against a real Wakeshift core (scripts/e2e.sh)"]
+addopts = "-m 'not e2e'"
+
+[tool.ruff]
+line-length = 130
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B", "UP"]
+ignore = ["E501"]
+
+[tool.pyright]
+include = ["src"]
+pythonVersion = "3.11"
+typeCheckingMode = "basic"
+venvPath = "."
+venv = ".venv"

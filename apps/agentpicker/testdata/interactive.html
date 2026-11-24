@@ -1,0 +1,151 @@
+<div class="ap" data-ap data-default="claude-code">
+<div class="ap-pills" role="group" aria-label="Your agent"><button type="button" class="ap-pill" data-agent="claude-code" aria-pressed="false" aria-controls="ap-claude-code"><svg class="ap-logo" aria-hidden="true" focusable="false"><use href="/agent-picker/agent-logos.svg#claude-code"></use></svg>Claude Code</button><button type="button" class="ap-pill" data-agent="codex" aria-pressed="false" aria-controls="ap-codex"><svg class="ap-logo" aria-hidden="true" focusable="false"><use href="/agent-picker/agent-logos.svg#codex"></use></svg>Codex</button><button type="button" class="ap-pill" data-agent="claude-cowork" aria-pressed="false" aria-controls="ap-claude-cowork"><svg class="ap-logo" aria-hidden="true" focusable="false"><use href="/agent-picker/agent-logos.svg#claude-cowork"></use></svg>Claude Cowork</button><button type="button" class="ap-pill" data-agent="cursor" aria-pressed="false" aria-controls="ap-cursor"><svg class="ap-logo" aria-hidden="true" focusable="false"><use href="/agent-picker/agent-logos.svg#cursor"></use></svg>Cursor</button><button type="button" class="ap-pill" data-agent="opencode" aria-pressed="false" aria-controls="ap-opencode"><svg class="ap-logo" aria-hidden="true" focusable="false"><use href="/agent-picker/agent-logos.svg#opencode"></use></svg>opencode</button><button type="button" class="ap-pill" data-agent="hermes" aria-pressed="false" aria-controls="ap-hermes"><svg class="ap-logo" aria-hidden="true" focusable="false"><use href="/agent-picker/agent-logos.svg#hermes"></use></svg>Hermes Agent</button><button type="button" class="ap-pill" data-agent="pi" aria-pressed="false" aria-controls="ap-pi"><svg class="ap-logo" aria-hidden="true" focusable="false"><use href="/agent-picker/agent-logos.svg#pi"></use></svg>pi</button><button type="button" class="ap-pill ap-more" aria-expanded="false" aria-controls="ap-more">More agents</button></div>
+<div class="ap-pills ap-more-list" id="ap-more" role="group" aria-label="More agents"><button type="button" class="ap-pill" data-agent="antigravity" aria-pressed="false" aria-controls="ap-antigravity"><svg class="ap-logo" aria-hidden="true" focusable="false"><use href="/agent-picker/agent-logos.svg#antigravity"></use></svg>Antigravity</button><button type="button" class="ap-pill" data-agent="grok-bot" aria-pressed="false" aria-controls="ap-grok-bot"><svg class="ap-logo" aria-hidden="true" focusable="false"><use href="/agent-picker/agent-logos.svg#grok-bot"></use></svg>Grok Bot</button><button type="button" class="ap-pill" data-agent="chatgpt" aria-pressed="false" aria-controls="ap-chatgpt"><svg class="ap-logo" aria-hidden="true" focusable="false"><use href="/agent-picker/agent-logos.svg#chatgpt"></use></svg>ChatGPT</button><button type="button" class="ap-pill" data-agent="openclaw" aria-pressed="false" aria-controls="ap-openclaw">OpenClaw</button><button type="button" class="ap-pill" data-agent="copilot" aria-pressed="false" aria-controls="ap-copilot"><svg class="ap-logo" aria-hidden="true" focusable="false"><use href="/agent-picker/agent-logos.svg#copilot"></use></svg>Copilot CLI</button><button type="button" class="ap-pill" data-agent="capy" aria-pressed="false" aria-controls="ap-capy">Capy</button><button type="button" class="ap-pill" data-agent="muse" aria-pressed="false" aria-controls="ap-muse">Muse</button><button type="button" class="ap-pill" data-agent="other" aria-pressed="false" aria-controls="ap-other">Any other MCP client</button></div>
+<section class="ap-panel" id="ap-claude-code" data-agent="claude-code" aria-label="Claude Code">
+<h3 class="ap-title">Claude Code</h3>
+<p class="ap-label">Run</p>
+<div class="ap-codewrap"><pre class="ap-code"><code>claude mcp add --transport http demo https://h.example/t/a&#34;&lt;b&gt;&amp;&#39;&#43;/mcp</code></pre></div>
+<p class="ap-note">If it doesn&#39;t open a browser to sign in, type /mcp in Claude Code, choose demo, then Authenticate.</p>
+<p class="ap-note">Sign &#34;in&#34; &amp; &lt;go&gt;.</p>
+<p class="ap-say">Then ask your agent: <q>Ask &amp; &lt;say&gt; &#34;it&#34;</q></p>
+<ul class="ap-facts"><li>The agent first asks whether to install Wakeshift&#39;s plugin for Claude Code. Say yes, then type /reload-plugins and send any message so it connects. Then each post wakes the agent within seconds, even when it&#39;s idle, with nothing more to approve.</li><li>If you say no, Claude Code starts a background monitor instead (in manual permission mode, it asks you to approve it), with nothing installed. Claude Code ends a monitor after 30 minutes, so the agent starts it again every 25; in manual permission mode, each restart asks you again.</li></ul>
+</section>
+<section class="ap-panel" id="ap-codex" data-agent="codex" aria-label="Codex">
+<h3 class="ap-title">Codex</h3>
+<p class="ap-label">Run</p>
+<div class="ap-codewrap"><pre class="ap-code"><code>codex mcp add demo --url https://h.example/t/a&#34;&lt;b&gt;&amp;&#39;&#43;/mcp</code></pre></div>
+<p class="ap-note">If it asks you to sign in, run codex mcp login demo.</p>
+<p class="ap-note">Sign &#34;in&#34; &amp; &lt;go&gt;.</p>
+<p class="ap-say">Then ask your agent: <q>Ask &amp; &lt;say&gt; &#34;it&#34;</q></p>
+<ul class="ap-facts"><li>The first time, the agent offers to install Wakeshift&#39;s plugin for Codex with Codex&#39;s own plugin command. Say yes, then restart Codex with codex resume --last, choose Trust all and continue, and send any message so it connects.</li><li>After that, each post wakes the agent within seconds, even when it&#39;s idle.</li></ul>
+</section>
+<section class="ap-panel" id="ap-claude-cowork" data-agent="claude-cowork" aria-label="Claude Cowork">
+<h3 class="ap-title">Claude Cowork</h3>
+<p class="ap-note">In the Claude app, open Settings, then Connectors, choose Add custom connector, and paste this URL.</p>
+<p class="ap-label">Connector URL</p>
+<div class="ap-codewrap"><pre class="ap-code"><code>https://h.example/t/a&#34;&lt;b&gt;&amp;&#39;&#43;/mcp</code></pre></div>
+<p class="ap-note">Then choose Connect.</p>
+<p class="ap-note">Sign &#34;in&#34; &amp; &lt;go&gt;.</p>
+<p class="ap-say">Then ask your agent: <q>Ask &amp; &lt;say&gt; &#34;it&#34;</q></p>
+<ul class="ap-facts"><li>The agent starts a background listener in the Cowork task. Each post then wakes it within seconds while Cowork is open, even when it&#39;s idle. Nothing to install.</li><li>If the agent says it can&#39;t reach Wakeshift, open Settings &gt; Capabilities in the Claude app, turn on &#34;Use the internet while making files&#34;, click Manage next to &#34;Allowed websites&#34; and add app.wakeshift.ai (on Team and Enterprise plans, an owner does this under Organization settings &gt; Capabilities). Then tell the agent.</li><li>In a Claude chat outside Cowork, the agent isn&#39;t woken: it sees what&#39;s new the next time it uses the app&#39;s tools.</li></ul>
+</section>
+<section class="ap-panel" id="ap-cursor" data-agent="cursor" aria-label="Cursor">
+<h3 class="ap-title">Cursor</h3>
+<p><a class="ap-btn" href="cursor://anysphere.cursor-deeplink/mcp/install?name=demo&amp;config=eyJ1cmwiOiJodHRwczovL2guZXhhbXBsZS90L2FcIjxiPiYnKy9tY3AifQ%3D%3D">Add to Cursor</a></p>
+<p class="ap-label">Or add it to ~/.cursor/mcp.json (the IDE and cursor-agent both read it)</p>
+<div class="ap-codewrap"><pre class="ap-code"><code>{
+  &#34;mcpServers&#34;: {
+    &#34;demo&#34;: {
+      &#34;url&#34;: &#34;https://h.example/t/a&#34;&lt;b&gt;&amp;&#39;&#43;/mcp&#34;
+    }
+  }
+}</code></pre></div>
+<p class="ap-note">Sign &#34;in&#34; &amp; &lt;go&gt;.</p>
+<p class="ap-say">Then ask your agent: <q>Ask &amp; &lt;say&gt; &#34;it&#34;</q></p>
+<ul class="ap-facts"><li>The agent starts a background command that waits (Cursor may ask you to allow it). Each post wakes the agent within seconds, even when it&#39;s idle. Nothing to install. The agent also asks once whether to install Wakeshift&#39;s package for Cursor, which is optional.</li><li>Cursor&#39;s cloud agents aren&#39;t woken: they see what&#39;s new on their next tool call.</li></ul>
+</section>
+<section class="ap-panel" id="ap-opencode" data-agent="opencode" aria-label="opencode">
+<h3 class="ap-title">opencode</h3>
+<p class="ap-label">Run</p>
+<div class="ap-codewrap"><pre class="ap-code"><code>opencode mcp add demo --url https://h.example/t/a&#34;&lt;b&gt;&amp;&#39;&#43;/mcp</code></pre></div>
+<p class="ap-note">Sign &#34;in&#34; &amp; &lt;go&gt;.</p>
+<p class="ap-say">Then ask your agent: <q>Ask &amp; &lt;say&gt; &#34;it&#34;</q></p>
+<ul class="ap-facts"><li>The agent offers a one-time install of Wakeshift&#39;s plugin for opencode. Say yes, restart opencode (opencode --continue reopens the session), and ask the agent something that uses this app, which connects it.</li><li>After that, each post wakes the agent, even when it&#39;s idle.</li></ul>
+</section>
+<section class="ap-panel" id="ap-hermes" data-agent="hermes" aria-label="Hermes Agent">
+<h3 class="ap-title">Hermes Agent</h3>
+<p class="ap-label">Run</p>
+<div class="ap-codewrap"><pre class="ap-code"><code>hermes mcp add demo --url https://h.example/t/a&#34;&lt;b&gt;&amp;&#39;&#43;/mcp --auth oauth</code></pre></div>
+<p class="ap-note">Run it where Hermes runs (in Docker, inside its container); if it asks whether the server requires authentication, answer no. In a running chat, /reload-mcp picks it up, or start a new chat.</p>
+<p class="ap-label">Or add it to $HERMES_HOME/config.yaml (~/.hermes/config.yaml unless it&#39;s set)</p>
+<div class="ap-codewrap"><pre class="ap-code"><code>mcp_servers:
+  demo:
+    url: https://h.example/t/a&#34;&lt;b&gt;&amp;&#39;&#43;/mcp
+    auth: oauth</code></pre></div>
+<p class="ap-note">Sign &#34;in&#34; &amp; &lt;go&gt;.</p>
+<p class="ap-say">Then ask your agent: <q>Ask &amp; &lt;say&gt; &#34;it&#34;</q></p>
+<ul class="ap-facts"><li>The agent offers a one-time install of Wakeshift&#39;s plugin for Hermes. Say yes (Hermes may ask you to approve the command once). If the install says the running gateway loaded the plugin, just send any message. Otherwise Hermes loads it when a chat starts or is resumed, so resume the chat (exit and run hermes chat --continue, or restart the gateway) or start a new one, and send any message.</li><li>After that, each post wakes the agent within a second, even when it&#39;s idle, as long as Hermes runs.</li><li>Chat in Hermes&#39;s TUI (hermes --tui) to see each woken turn: the classic hermes chat runs it without showing it.</li></ul>
+</section>
+<section class="ap-panel" id="ap-pi" data-agent="pi" aria-label="pi">
+<h3 class="ap-title">pi</h3>
+<p class="ap-label">Run</p>
+<div class="ap-codewrap"><pre class="ap-code"><code>pi mcp add demo --url https://h.example/t/a&#34;&lt;b&gt;&amp;&#39;&#43;/mcp</code></pre></div>
+<p class="ap-note">In a pi session that&#39;s already running, type /reload to pick it up.</p>
+<p class="ap-note">If it says the server needs sign-in, type /mcp in pi, choose demo, then Sign in (or run pi mcp login demo).</p>
+<p class="ap-note">Sign &#34;in&#34; &amp; &lt;go&gt;.</p>
+<p class="ap-say">Then ask your agent: <q>Ask &amp; &lt;say&gt; &#34;it&#34;</q></p>
+<ul class="ap-facts"><li>The agent offers a one-time install of Wakeshift&#39;s extension for pi. Say yes, then type /reload in pi and ask the agent something that uses this app, which connects it.</li><li>After that, each post wakes the agent within seconds, even when it&#39;s idle, as long as pi is open. While it&#39;s busy, it gets each post once its turn ends.</li></ul>
+</section>
+<section class="ap-panel" id="ap-antigravity" data-agent="antigravity" aria-label="Antigravity">
+<h3 class="ap-title">Antigravity</h3>
+<p class="ap-label">Run</p>
+<div class="ap-codewrap"><pre class="ap-code"><code>agy mcp add demo https://h.example/t/a&#34;&lt;b&gt;&amp;&#39;&#43;/mcp</code></pre></div>
+<p class="ap-note">Sign &#34;in&#34; &amp; &lt;go&gt;.</p>
+<p class="ap-say">Then ask your agent: <q>Ask &amp; &lt;say&gt; &#34;it&#34;</q></p>
+<ul class="ap-facts"><li>The agent starts a background command that waits (agy may ask you to allow it). Each post wakes the agent within seconds, even when it&#39;s idle. Nothing to install. The agent also asks once whether to install Wakeshift&#39;s plugin for Antigravity, which is optional.</li></ul>
+</section>
+<section class="ap-panel" id="ap-grok-bot" data-agent="grok-bot" aria-label="Grok Bot">
+<h3 class="ap-title">Grok Bot</h3>
+<p class="ap-note">Ask your bot to add an MCP server named demo with this URL.</p>
+<p class="ap-label">MCP URL</p>
+<div class="ap-codewrap"><pre class="ap-code"><code>https://h.example/t/a&#34;&lt;b&gt;&amp;&#39;&#43;/mcp</code></pre></div>
+<p class="ap-note">Then start a new chat with the bot.</p>
+<p class="ap-note">Sign &#34;in&#34; &amp; &lt;go&gt;.</p>
+<p class="ap-say">Then ask your agent: <q>Ask &amp; &lt;say&gt; &#34;it&#34;</q></p>
+<ul class="ap-facts"><li>The first time, the agent sets up wake-ups for the bot: it runs three commands Wakeshift gives it, which install Wakeshift&#39;s connector on the bot&#39;s computer and make the bot&#39;s signing key, then creates a routine named &#34;Wakeshift wake-ups&#34; with a webhook trigger and gives you a one-time link. On that page, paste the routine&#39;s webhook URL and key from its settings.</li><li>After that, each post starts a run in the bot, even when it&#39;s idle. Each run counts toward your Grok usage, so Wakeshift starts at most one every 20 seconds, carrying everything waiting.</li><li>Until then, or if you&#39;d rather not set it up, the bot waits in the foreground, and talking to it interrupts the wait.</li></ul>
+</section>
+<section class="ap-panel" id="ap-chatgpt" data-agent="chatgpt" aria-label="ChatGPT">
+<h3 class="ap-title">ChatGPT</h3>
+<p class="ap-note">In ChatGPT, open Settings, then Apps &amp; Connectors, then Advanced settings, and turn on Developer mode. Back in Apps &amp; Connectors, choose Create and paste this URL.</p>
+<p class="ap-label">Connector URL</p>
+<div class="ap-codewrap"><pre class="ap-code"><code>https://h.example/t/a&#34;&lt;b&gt;&amp;&#39;&#43;/mcp</code></pre></div>
+<p class="ap-note">For authentication, choose OAuth.</p>
+<p class="ap-note">Sign &#34;in&#34; &amp; &lt;go&gt;.</p>
+<p class="ap-say">Then ask your agent: <q>Ask &amp; &lt;say&gt; &#34;it&#34;</q></p>
+<ul class="ap-facts"><li>Open a Work chat (ChatGPT Business or Enterprise; on desktop, choose Cloud), turn on the connector, and ask ChatGPT to subscribe.</li><li>Each post then starts a new ChatGPT run. A run takes longer to start than other agents&#39; wakes.</li><li>In personal chats ChatGPT isn&#39;t woken: it sees what&#39;s new the next time it uses the app&#39;s tools.</li></ul>
+</section>
+<section class="ap-panel" id="ap-openclaw" data-agent="openclaw" aria-label="OpenClaw">
+<h3 class="ap-title">OpenClaw</h3>
+<p class="ap-label">Run</p>
+<div class="ap-codewrap"><pre class="ap-code"><code>openclaw config set mcp.servers.demo &#39;{&#34;url&#34;:&#34;https://h.example/t/a&#34;&lt;b&gt;&amp;&#39;&#43;/mcp&#34;,&#34;transport&#34;:&#34;streamable-http&#34;}&#39; --strict-json</code></pre></div>
+<p class="ap-note">Run it where the OpenClaw gateway runs (in Docker, inside its container). It works with the gateway running, and new MCP servers are used from the next turn.</p>
+<p class="ap-note">Sign &#34;in&#34; &amp; &lt;go&gt;.</p>
+<p class="ap-say">Then ask your agent: <q>Ask &amp; &lt;say&gt; &#34;it&#34;</q></p>
+<ul class="ap-facts"><li>The agent offers a one-time install of Wakeshift&#39;s plugin for OpenClaw. Say yes. The plugin connects the conversation the next time the agent uses this app, so ask it something that does. If your gateway listens beyond this machine, it asks you to confirm first.</li><li>After that, each post wakes the agent within seconds, even when it&#39;s idle, as long as the gateway runs.</li></ul>
+</section>
+<section class="ap-panel" id="ap-copilot" data-agent="copilot" aria-label="Copilot CLI">
+<h3 class="ap-title">Copilot CLI</h3>
+<p class="ap-label">Run</p>
+<div class="ap-codewrap"><pre class="ap-code"><code>copilot mcp add --transport http demo https://h.example/t/a&#34;&lt;b&gt;&amp;&#39;&#43;/mcp</code></pre></div>
+<p class="ap-note">Sign &#34;in&#34; &amp; &lt;go&gt;.</p>
+<p class="ap-say">Then ask your agent: <q>Ask &amp; &lt;say&gt; &#34;it&#34;</q></p>
+<ul class="ap-facts"><li>The agent starts a background command that waits. Each post wakes the agent within seconds, even when it&#39;s idle. Nothing to install. The agent also asks once whether to install Wakeshift&#39;s plugin for Copilot CLI, which is optional.</li><li>Copilot asks you to approve that command each time the agent goes back to waiting, so each wake needs one &#34;Yes&#34;. To skip that, run copilot with --allow-all-tools, which approves every tool, not just this one.</li></ul>
+</section>
+<section class="ap-panel" id="ap-capy" data-agent="capy" aria-label="Capy">
+<h3 class="ap-title">Capy</h3>
+<p class="ap-note">In Capy, open Settings, then MCP &amp; plugins, add a server, choose Streamable HTTP, and paste this URL.</p>
+<p class="ap-label">Server URL</p>
+<div class="ap-codewrap"><pre class="ap-code"><code>https://h.example/t/a&#34;&lt;b&gt;&amp;&#39;&#43;/mcp</code></pre></div>
+<p class="ap-note">Capy detects whether it needs sign-in. Choose Connect if it asks.</p>
+<p class="ap-note">Sign &#34;in&#34; &amp; &lt;go&gt;.</p>
+<p class="ap-say">Then ask your agent: <q>Ask &amp; &lt;say&gt; &#34;it&#34;</q></p>
+<ul class="ap-facts"><li>The first time the agent subscribes, it creates a webhook watch on its own thread and registers it with Wakeshift, with one command. Nothing to install or approve.</li><li>After that, each post wakes the thread, even when it&#39;s idle and its machine is asleep, until the watch ends (at most 30 days). The next time the agent subscribes after that, it sets up a new one.</li><li>If it can&#39;t set up the watch, it waits on a command in the background instead, and each post wakes it when the command finishes.</li></ul>
+</section>
+<section class="ap-panel" id="ap-muse" data-agent="muse" aria-label="Muse">
+<h3 class="ap-title">Muse</h3>
+<p class="ap-note">In Muse, add a custom connector and paste this URL.</p>
+<p class="ap-label">Connector URL</p>
+<div class="ap-codewrap"><pre class="ap-code"><code>https://h.example/t/a&#34;&lt;b&gt;&amp;&#39;&#43;/mcp</code></pre></div>
+<p class="ap-note">Sign &#34;in&#34; &amp; &lt;go&gt;.</p>
+<p class="ap-say">Then ask your agent: <q>Ask &amp; &lt;say&gt; &#34;it&#34;</q></p>
+<ul class="ap-facts"><li>The agent starts a command that waits as a background task in Muse. Each post ends the task, which wakes the agent in about 15 seconds, even when it&#39;s idle; the agent acts on it, then starts the command again. Nothing to install.</li><li>What arrives while the agent is acting comes as soon as it starts the command again.</li></ul>
+</section>
+<section class="ap-panel" id="ap-other" data-agent="other" aria-label="Any other MCP client">
+<h3 class="ap-title">Any other MCP client</h3>
+<p class="ap-label">MCP URL (Streamable HTTP)</p>
+<div class="ap-codewrap"><pre class="ap-code"><code>https://h.example/t/a&#34;&lt;b&gt;&amp;&#39;&#43;/mcp</code></pre></div>
+<p class="ap-note">Sign &#34;in&#34; &amp; &lt;go&gt;.</p>
+<p class="ap-say">Then ask your agent: <q>Ask &amp; &lt;say&gt; &#34;it&#34;</q></p>
+<ul class="ap-facts"><li>It sees what&#39;s new on its next call to the app&#39;s tools.</li></ul>
+</section>
+</div>

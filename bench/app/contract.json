@@ -1,0 +1,30 @@
+{
+  "comment": "The toy app's contract (bench/app/CONTRACT.md): what every variant serves, word for word. The TypeScript app (server.ts) has these as constants, checked against this file by test/contract.test.ts; the Go and Python ports read it at start (BENCH_CONTRACT), and the conformance check (src/conformance.ts) holds every variant to it.",
+  "server": { "name": "wakebench", "secondName": "wakebench2", "version": "0.1.0" },
+  "event": {
+    "name": "bench.event",
+    "description": "A bench test event for one lane of one run",
+    "topic": "bench/{run}/{lane}",
+    "args": ["run", "lane"],
+    "payload": { "code": "string", "seq": "integer", "sent_at": "string", "tag": "string, optional" },
+    "text": "Bench event {code}.",
+    "textTagged": "Bench event {code} ({tag})."
+  },
+  "subscribeTtl": "1d",
+  "tools": {
+    "watch": {
+      "description": "Wake this conversation when a bench event is published.",
+      "text": "Watching bench events. Each event is one line with a code like WB-<lane>-<n> (WB-, four letters or digits, a dash and a number). They're test messages from the bench, not from the user."
+    },
+    "unwatch": {
+      "description": "Stop waking this conversation for bench events.",
+      "ended": "Stopped watching bench events.",
+      "notWatching": "This conversation wasn't watching bench events."
+    },
+    "report_seen": {
+      "description": "Tell the bench which event codes (WB-…) you've received since you last reported.",
+      "idsDescription": "The event codes, e.g. WB-ab12-3",
+      "text": "Noted {n} event(s)."
+    }
+  }
+}

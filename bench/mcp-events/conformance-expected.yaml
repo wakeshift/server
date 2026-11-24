@@ -1,0 +1,141 @@
+# Expected failures of the official MCP Events conformance suite
+# (modelcontextprotocol/conformance#521, pinned in conformance.json) against
+# the toy app on a local core: src/eventsconformance.ts, bench/README.md
+# ("MCP Events conformance"). Each entry is <scenario>:<check id>, as the
+# suite's own baselines write it. item names what fixes it:
+#   P0 #n, P1 #n  an item of Wakeshift's own plan for spec compliance (priority, number)
+#   bench         a limit of the bench's setup (its core or toy app), not of Wakeshift
+#   suite         a row the suite can't grade against a server like ours
+# Remove an entry when its item lands: the run fails on an entry that passes.
+expected:
+  - check: events-poll:sep-3415-poll-mode-unsupported
+    item: "bench"
+    why: "Needs an event type that doesn't offer poll. The toy app's one event (bench.event) offers every mode the SDK serves."
+  - check: events-poll:sep-3415-mcp-name-missing-rejected
+    item: "P0 #3"
+    why: "A missing Mcp-Name is accepted, a deliberate client-compatibility choice: ChatGPT, OpenClaw, Vercel and Hermes send none."
+  - check: events-push:sep-3415-stream-error-is-recoverable
+    item: "suite"
+    why: "Wakeshift never sends notifications/events/error: an occurrence it can't send is a gap (active with truncated), so there's no recoverable per-occurrence error to observe, and the toy app has no events_conformance_yield_error control."
+  - check: events-push:sep-3415-stream-gap-resends-active
+    item: "bench"
+    why: "The core makes a gap only for an occurrence it can't send (over 256 KiB, or its content deleted), which an app can't cause, so the toy app has no events_conformance_yield_gap control. Core tests pin it (TestPushGapResendsActive, TestPushGapRedacted)."
+  - check: events-push:sep-3415-error-resource-exhausted
+    item: "suite"
+    why: "Graded only when one of the suite's three concurrent streams is refused; three per user are always accepted (20 per user, 2,000 per app), and the toy app has no events_conformance_quota control. Core tests pin the caps (TestPushRefusals)."
+  - check: events-push:sep-3415-mcp-name-missing-rejected
+    item: "P0 #3"
+    why: "A missing Mcp-Name is accepted on events/stream, as on poll and subscribe (client compatibility)."
+  - check: events-push:sep-3415-stream-mode-unsupported
+    item: "bench"
+    why: "Needs an event type that doesn't offer push, and every event the toy app lists offers it (each SDK's push option is per attach, not per event)."
+  - check: events-push:sep-3415-stream-terminated-ends-subscription
+    item: "bench"
+    apps: [go-sdk, py-mcpserver]
+    why: "Needs the events_conformance_terminate control and a spare push event, which only server.ts (ts-v2) has so far; the Go and Python ports get them next. ts-v2 passes it, and core tests pin termination (TestPushRevoked)."
+  - check: events-push:sep-3415-removal-error-not-found
+    item: "bench"
+    why: "Needs the events_conformance_catalog control (add, then remove or retype an event type mid-run), which the toy app doesn't have. Removal does end subscriptions, within the hourly recheck (core tests)."
+  - check: events-push:sep-3415-removal-error-schema-changed
+    item: "P1 #9"
+    why: "In-place schema breaks aren't detected, so no Unsupported/schema_changed. The toy app also has no events_conformance_catalog control to change its catalog mid-run."
+  - check: events-push:sep-3415-removal-additive-no-terminate
+    item: "bench"
+    why: "Needs the events_conformance_catalog control (add, then remove or retype an event type mid-run), which the toy app doesn't have. Removal does end subscriptions, within the hourly recheck (core tests)."
+  - check: events-webhook:sep-3415-subscribe-secret-required
+    item: "suite"
+    why: "The scenario subscribes with callbacks on conformance.invalid, which never resolves. The core verifies a callback inside events/subscribe (allowed: verification before delivery) and answers -32027, so no subscription is made and the row is untestable. S10 covers subscribe, refresh and unsubscribe against a reachable callback."
+  - check: events-webhook:sep-3415-subscribe-secret-format
+    item: "suite"
+    why: "The scenario subscribes with callbacks on conformance.invalid, which never resolves. The core verifies a callback inside events/subscribe (allowed: verification before delivery) and answers -32027, so no subscription is made and the row is untestable. S10 covers subscribe, refresh and unsubscribe against a reachable callback."
+  - check: events-webhook:sep-3415-subscribe-secret-rejected
+    item: "suite"
+    why: "The scenario subscribes with callbacks on conformance.invalid, which never resolves. The core verifies a callback inside events/subscribe (allowed: verification before delivery) and answers -32027, so no subscription is made and the row is untestable. S10 covers subscribe, refresh and unsubscribe against a reachable callback."
+  - check: events-webhook:sep-3415-subscribe-url-https-required
+    item: "suite"
+    why: "The scenario subscribes with callbacks on conformance.invalid, which never resolves. The core verifies a callback inside events/subscribe (allowed: verification before delivery) and answers -32027, so no subscription is made and the row is untestable. S10 covers subscribe, refresh and unsubscribe against a reachable callback."
+  - check: events-webhook:sep-3415-subscribe-url-non-https-rejected
+    item: "suite"
+    why: "The scenario subscribes with callbacks on conformance.invalid, which never resolves. The core verifies a callback inside events/subscribe (allowed: verification before delivery) and answers -32027, so no subscription is made and the row is untestable. S10 covers subscribe, refresh and unsubscribe against a reachable callback."
+  - check: events-webhook:sep-3415-subscribe-key-composition
+    item: "suite"
+    why: "The scenario subscribes with callbacks on conformance.invalid, which never resolves. The core verifies a callback inside events/subscribe (allowed: verification before delivery) and answers -32027, so no subscription is made and the row is untestable. S10 covers subscribe, refresh and unsubscribe against a reachable callback."
+  - check: events-webhook:sep-3415-subscribe-key-immutable
+    item: "suite"
+    why: "The scenario subscribes with callbacks on conformance.invalid, which never resolves. The core verifies a callback inside events/subscribe (allowed: verification before delivery) and answers -32027, so no subscription is made and the row is untestable. S10 covers subscribe, refresh and unsubscribe against a reachable callback."
+  - check: events-webhook:sep-3415-subscribe-idempotent-upsert
+    item: "suite"
+    why: "The scenario subscribes with callbacks on conformance.invalid, which never resolves. The core verifies a callback inside events/subscribe (allowed: verification before delivery) and answers -32027, so no subscription is made and the row is untestable. S10 covers subscribe, refresh and unsubscribe against a reachable callback."
+  - check: events-webhook:sep-3415-subscribe-id-derived
+    item: "suite"
+    why: "The scenario subscribes with callbacks on conformance.invalid, which never resolves. The core verifies a callback inside events/subscribe (allowed: verification before delivery) and answers -32027, so no subscription is made and the row is untestable. S10 covers subscribe, refresh and unsubscribe against a reachable callback."
+  - check: events-webhook:sep-3415-subscribe-id-not-an-input
+    item: "suite"
+    why: "The scenario subscribes with callbacks on conformance.invalid, which never resolves. The core verifies a callback inside events/subscribe (allowed: verification before delivery) and answers -32027, so no subscription is made and the row is untestable. S10 covers subscribe, refresh and unsubscribe against a reachable callback."
+  - check: events-webhook:sep-3415-subscribe-refresh-reactivates
+    item: "suite"
+    why: "The scenario subscribes with callbacks on conformance.invalid, which never resolves. The core verifies a callback inside events/subscribe (allowed: verification before delivery) and answers -32027, so no subscription is made and the row is untestable. S10 covers subscribe, refresh and unsubscribe against a reachable callback."
+  - check: events-webhook:sep-3415-subscribe-response-cursor
+    item: "suite"
+    why: "The scenario subscribes with callbacks on conformance.invalid, which never resolves. The core verifies a callback inside events/subscribe (allowed: verification before delivery) and answers -32027, so no subscription is made and the row is untestable. S10 covers subscribe, refresh and unsubscribe against a reachable callback."
+  - check: events-webhook:sep-3415-subscribe-response-truncated
+    item: "suite"
+    why: "The scenario subscribes with callbacks on conformance.invalid, which never resolves. The core verifies a callback inside events/subscribe (allowed: verification before delivery) and answers -32027, so no subscription is made and the row is untestable. S10 covers subscribe, refresh and unsubscribe against a reachable callback."
+  - check: events-webhook:sep-3415-subscribe-refresh-before-present
+    item: "suite"
+    why: "The scenario subscribes with callbacks on conformance.invalid, which never resolves. The core verifies a callback inside events/subscribe (allowed: verification before delivery) and answers -32027, so no subscription is made and the row is untestable. S10 covers subscribe, refresh and unsubscribe against a reachable callback."
+  - check: events-webhook:sep-3415-subscribe-cross-tenant-isolation
+    item: "suite"
+    why: "The scenario subscribes with callbacks on conformance.invalid, which never resolves. The core verifies a callback inside events/subscribe (allowed: verification before delivery) and answers -32027, so no subscription is made and the row is untestable. S10 covers subscribe, refresh and unsubscribe against a reachable callback."
+  - check: events-webhook:sep-3415-ttl-refresh-before-lte-suggestion
+    item: "suite"
+    why: "The scenario subscribes with callbacks on conformance.invalid, which never resolves. The core verifies a callback inside events/subscribe (allowed: verification before delivery) and answers -32027, so no subscription is made and the row is untestable. S10 covers subscribe, refresh and unsubscribe against a reachable callback."
+  - check: events-webhook:sep-3415-ttl-no-rejection-path
+    item: "suite"
+    why: "The scenario subscribes with callbacks on conformance.invalid, which never resolves. The core verifies a callback inside events/subscribe (allowed: verification before delivery) and answers -32027, so no subscription is made and the row is untestable. S10 covers subscribe, refresh and unsubscribe against a reachable callback."
+  - check: events-webhook:sep-3415-ttl-null-only-when-requested
+    item: "suite"
+    why: "The scenario subscribes with callbacks on conformance.invalid, which never resolves. The core verifies a callback inside events/subscribe (allowed: verification before delivery) and answers -32027, so no subscription is made and the row is untestable. S10 covers subscribe, refresh and unsubscribe against a reachable callback."
+  - check: events-webhook:sep-3415-ttl-omitted-means-default
+    item: "suite"
+    why: "The scenario subscribes with callbacks on conformance.invalid, which never resolves. The core verifies a callback inside events/subscribe (allowed: verification before delivery) and answers -32027, so no subscription is made and the row is untestable. S10 covers subscribe, refresh and unsubscribe against a reachable callback."
+  - check: events-webhook:sep-3415-ttl-long-grant-retained
+    item: "suite"
+    why: "The scenario subscribes with callbacks on conformance.invalid, which never resolves. The core verifies a callback inside events/subscribe (allowed: verification before delivery) and answers -32027, so no subscription is made and the row is untestable. S10 covers subscribe, refresh and unsubscribe against a reachable callback."
+  - check: events-webhook:sep-3415-ttl-no-expiry-persisted
+    item: "suite"
+    why: "The scenario subscribes with callbacks on conformance.invalid, which never resolves. The core verifies a callback inside events/subscribe (allowed: verification before delivery) and answers -32027, so no subscription is made and the row is untestable. S10 covers subscribe, refresh and unsubscribe against a reachable callback."
+  - check: events-webhook:sep-3415-ttl-no-expiry-gc-terminated
+    item: "suite"
+    why: "The scenario subscribes with callbacks on conformance.invalid, which never resolves. The core verifies a callback inside events/subscribe (allowed: verification before delivery) and answers -32027, so no subscription is made and the row is untestable. S10 covers subscribe, refresh and unsubscribe against a reachable callback."
+  - check: events-webhook:sep-3415-unsubscribe-by-key
+    item: "suite"
+    why: "The scenario subscribes with callbacks on conformance.invalid, which never resolves. The core verifies a callback inside events/subscribe (allowed: verification before delivery) and answers -32027, so no subscription is made and the row is untestable. S10 covers subscribe, refresh and unsubscribe against a reachable callback."
+  - check: events-webhook:sep-3415-unsubscribe-empty-result
+    item: "suite"
+    why: "The scenario subscribes with callbacks on conformance.invalid, which never resolves. The core verifies a callback inside events/subscribe (allowed: verification before delivery) and answers -32027, so no subscription is made and the row is untestable. S10 covers subscribe, refresh and unsubscribe against a reachable callback."
+  - check: events-webhook:sep-3415-unsubscribe-unknown-not-found
+    item: "suite"
+    why: "The scenario subscribes with callbacks on conformance.invalid, which never resolves. The core verifies a callback inside events/subscribe (allowed: verification before delivery) and answers -32027, so no subscription is made and the row is untestable. S10 covers subscribe, refresh and unsubscribe against a reachable callback."
+  - check: events-webhook:sep-3415-error-unsupported
+    item: "suite"
+    why: "The scenario subscribes with callbacks on conformance.invalid, which never resolves. The core verifies a callback inside events/subscribe (allowed: verification before delivery) and answers -32027, so no subscription is made and the row is untestable. S10 covers subscribe, refresh and unsubscribe against a reachable callback."
+  - check: events-webhook:sep-3415-mcp-name-missing-rejected
+    item: "P0 #3"
+    why: "A missing Mcp-Name is accepted on subscribe and unsubscribe (client compatibility, as on poll)."
+  - check: events-webhook:sep-3415-mcp-name-mismatch-rejected
+    item: "suite"
+    apps: [ts-v2, go-sdk, py-mcpserver]
+    why: "Untestable on this variant: the probe needs a subscription first, and the scenario's conformance.invalid callback can't be verified (see the rows above)."
+  - check: events-webhook:sep-3415-result-type-complete
+    item: "suite"
+    why: "The scenario subscribes with callbacks on conformance.invalid, which never resolves. The core verifies a callback inside events/subscribe (allowed: verification before delivery) and answers -32027, so no subscription is made and the row is untestable. S10 covers subscribe, refresh and unsubscribe against a reachable callback."
+  - check: events-webhook-delivery:sep-3415-ssrf-reject-non-routable
+    item: "bench"
+    why: "The bench's core allows loopback callbacks (AllowLoopback, set only in tests) so the suite's receiver gets deliveries. Production refuses non-public addresses at subscribe and on connect (mcpevents.publicAddr, core tests)."
+  - check: events-webhook-delivery:sep-3415-ssrf-validate-callback-url
+    item: "bench"
+    why: "The bench's core allows loopback callbacks (AllowLoopback, set only in tests) so the suite's receiver gets deliveries. Production refuses non-public addresses at subscribe and on connect (mcpevents.publicAddr, core tests)."
+  - check: events-webhook-delivery:sep-3415-ssrf-validate-at-delivery-time
+    item: "suite"
+    why: "Untestable: needs a hostname whose DNS answer changes between subscribe and delivery. The core checks the connected address on every dial (mcpevents.Client)."

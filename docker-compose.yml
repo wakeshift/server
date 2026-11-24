@@ -1,0 +1,78 @@
+# Postgres and the Wakeshift server, on this machine only:
+#
+#   docker compose run --build --rm --no-deps --entrypoint /appkey server -app example
+#   export WAKESHIFT_APPS='<the JSON it printed after WAKESHIFT_APPS=>'
+#   export WAKESHIFT_SECRET_KEY=$(openssl rand -base64 48)
+#   docker compose up --build
+#
+# The server is at http://localhost:8370 and migrates the database at
+# startup. WAKESHIFT_APPS registers your apps by their public keys; your
+# app's SDK takes the WAKESHIFT_KEY line, with WAKESHIFT_CORE set to
+# http://localhost:8370. (With Go: go run ./cmd/appkey -app example.)
+# `go run ./internal/releasegate` (make gate) does all of this with a fresh
+# key and checks an event reaches an MCP Events client on push.
+#
+# Every port is published on 127.0.0.1 only. Inside the container the
+# server listens on all of its interfaces (WAKESHIFT_ADDR, :8370), which
+# Docker's port publishing needs, and a browser's connection arrives from
+# Docker's network, not loopback. So this setup uses neither the console's
+# email-only development sign-in (WAKESHIFT_DEV_SIGN_IN) nor the published
+# development secret key, which the server allows only on loopback. To use
+# the console with that sign-in, run the server on this machine instead:
+# `make run` starts only Postgres here and the server on 127.0.0.1:8370.
+# Or set up a GitHub or Google OAuth app (the variables below).
+services:
+  postgres:
+    image: postgres:17.11
+    environment:
+      POSTGRES_USER: postgres
+      # This local database's superuser, used only by the init script below.
+      POSTGRES_PASSWORD: postgres
+    ports:
+      - "127.0.0.1:${WAKESHIFT_DB_PORT:-5439}:5432"
+    volumes:
+      - ./deploy/postgres-init.sql:/docker-entrypoint-initdb.d/init.sql:ro
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      # Over TCP: during its first start, Postgres runs the init script on a
+      # server that listens only on its socket.
+      test: ["CMD-SHELL", "pg_isready -h 127.0.0.1 -U postgres -d wakeshift"]
+      interval: 2s
+      timeout: 5s
+      retries: 30
+
+  server:
+    build: .
+    # Or the published image instead of building: image: ghcr.io/wakeshift/server:<version>
+    depends_on:
+      postgres:
+        condition: service_healthy
+    ports:
+      - "127.0.0.1:8370:8370"
+    environment:
+      # The owner role from deploy/postgres-init.sql: not a superuser, so
+      # row-level security applies.
+      DATABASE_URL: postgres://wakeshift:wakeshift@postgres:5432/wakeshift?sslmode=disable
+      WAKESHIFT_ADDR: ":8370"
+      WAKESHIFT_PUBLIC_URL: http://localhost:8370
+      # Required: at least 32 random bytes (openssl rand -base64 48). Unset,
+      # the server exits saying so.
+      WAKESHIFT_SECRET_KEY: ${WAKESHIFT_SECRET_KEY:-}
+      WAKESHIFT_APPS: ${WAKESHIFT_APPS:-[]}
+      # MCP Events push (events/stream). Unset, it's on only when
+      # WAKESHIFT_PUBLIC_URL is a localhost URL; on here, so it stays on if
+      # you change that URL.
+      WAKESHIFT_MCP_EVENTS_PUSH: "1"
+      WAKESHIFT_LOG_FORMAT: text
+      # Sign-in for the console (optional): an OAuth app's credentials,
+      # whose callback is http://localhost:8370/auth/github/callback (or
+      # /auth/google/callback).
+      WAKESHIFT_GITHUB_CLIENT_ID: ${WAKESHIFT_GITHUB_CLIENT_ID:-}
+      WAKESHIFT_GITHUB_CLIENT_SECRET: ${WAKESHIFT_GITHUB_CLIENT_SECRET:-}
+      WAKESHIFT_GOOGLE_CLIENT_ID: ${WAKESHIFT_GOOGLE_CLIENT_ID:-}
+      WAKESHIFT_GOOGLE_CLIENT_SECRET: ${WAKESHIFT_GOOGLE_CLIENT_SECRET:-}
+      # Who may create an account (comma-separated emails and @domains).
+      WAKESHIFT_ALLOWED_SIGNUPS: ${WAKESHIFT_ALLOWED_SIGNUPS:-}
+
+volumes:
+  pgdata:

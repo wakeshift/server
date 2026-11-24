@@ -1,0 +1,1078 @@
+package connector
+
+import (
+	"context"
+	"crypto/rand"
+	"encoding/hex"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"io"
+	"net/http"
+	"net/url"
+	"os"
+	"path/filepath"
+	"regexp"
+	"strings"
+	"sync"
+	"time"
+
+	"github.com/wakeshift/server/internal/pluginmark"
+	"github.com/wakeshift/server/internal/version"
+)
+
+// Event is what a hook call is about.
+type Event int
+
+const (
+	OtherEvent Event = iota
+	// ToolResult: after a tool call, with its result (where beacons are).
+	ToolResult
+	// Stop: the agent finished its turn; the hook may continue it.
+	Stop
+	// Rewake: an async hook that may wait as long as it likes and wakes
+	// the idle session when it exits (Claude Code's asyncRewake).
+	Rewake
+	// TurnStart: before a turn (Antigravity's PreInvocation): context can
+	// be added there when it can't after a tool call.
+	TurnStart
+	// PreCall: before an MCP tool call, where the hook can tell the server
+	// the conversation (Copilot's preMcpToolCall).
+	PreCall
+	// Resolve: a resolver the tool-result hook started (ResolveSoon) reads
+	// the conversation's deferred results as soon as they're written.
+	Resolve
+	// CallDone: after an MCP tool call, naming its server, before the
+	// tool-result hook (Cursor's afterMCPExecution): recorded so the
+	// result's hook knows its server (CallServerFormat).
+	CallDone
+	// SessionContext: a session starts, and the hook adds context for the
+	// model: the plugin's mark to pass (SessionContextFormat).
+	SessionContext
+	// Approve: the harness is about to ask the user to approve a tool
+	// call (Copilot's permissionRequest); the hook approves Wakeshift's
+	// own wait command, exactly, and nothing else (ApproveFormat).
+	Approve
+)
+
+// ApproveFormat is a Format whose harness asks a hook before it asks the
+// user to approve a tool call (Approve): Shell says whether a tool is its
+// shell, and Approve is the answer that approves the call. Denied says
+// whether the user has a rule of the harness's that denies (or asks for)
+// the command, or whether that can't be told: either way the hook doesn't
+// approve it.
+type ApproveFormat interface {
+	Shell(tool string) bool
+	Approve() Output
+	Denied(command string) bool
+}
+
+// CallServerFormat is a Format whose tool-result hook doesn't name the MCP
+// server, but whose CallDone hook does, for the same call ID (Cursor).
+type CallServerFormat interface {
+	CallServers() bool
+}
+
+// PreCallFormat is a Format that answers PreCall.
+type PreCallFormat interface {
+	PreCall(in Input) (Output, bool)
+}
+
+// SessionContextFormat is a Format that adds context when a session
+// starts (SessionContext): the plugin's mark (internal/pluginmark) for the
+// model to pass as the harness argument of an app's tools.
+type SessionContextFormat interface {
+	SessionContext(mark string, hooks bool) (Output, bool)
+}
+
+// ContextForFormat is a SessionContextFormat that adds the mark's context
+// for other hook events than the session's start (Claude Code's
+// SubagentStart: Input.contextEvent).
+type ContextForFormat interface {
+	ContextFor(event, mark string, hooks bool) (Output, bool)
+}
+
+// WaitMarkFormat is a SessionContextFormat whose marked result tells the
+// agent to run Wakeshift's wait command (Copilot CLI's): without one here
+// (WaitCommand "": a path no rule can hold), no mark, so the result is the
+// unmarked one, whose shell loop still wakes the conversation.
+type WaitMarkFormat interface {
+	MarkNeedsWait() bool
+}
+
+// StripFormat is a Format that can take a beacon out of the result the
+// model sees.
+type StripFormat interface {
+	Strip(in Input) (Output, bool)
+}
+
+// EventFormat is a Format whose input doesn't name its event: the hook
+// command does (--event).
+type EventFormat interface {
+	ParseEvent(event string, stdin []byte) (Input, error)
+}
+
+// Input is a hook call, read from the harness's own format.
+type Input struct {
+	Event        Event
+	Conversation string // the harness's conversation (session) ID
+	ToolName     string // for ToolResult, PreCall and Approve
+	// Command is the shell command an Approve asks about.
+	Command string
+	// MCPTool is the MCP tool that produced the result, by its bare name as
+	// the app's server lists it (ToolName without the harness's server
+	// prefix), "" if the harness doesn't say: a beacon is acted on only
+	// from the result of the tool it names (beacon.Claims.Tool; ToolOf).
+	MCPTool string
+	// ToolSep: for a harness whose tool names join server and tool with a
+	// separator either may contain (opencode: "_"), the separator; MCPTool
+	// is then "" and ToolOf matches ToolName's end.
+	ToolSep    string
+	ToolCallID string          // for ToolResult, if the harness gives one
+	ToolResult json.RawMessage // the tool's result, as the harness passes it
+	// Server is the MCP server the result came from, for harnesses whose
+	// hooks say ("" for the others): beacons from it are checked against
+	// the app it's pinned to (Pins).
+	Server string
+	// ServerConversation is Server's own name for the conversation, for
+	// harnesses whose servers the hook tells (AliasFormat): what beacons
+	// from that server are bound to, and what redeems them.
+	ServerConversation string
+	// ServerURL is the URL the harness says the call went to, if it says
+	// (Cursor), checked against its MCP settings before a tool rule names
+	// the server (toolrules.go).
+	ServerURL string
+	// Dirs are the conversation's folders, if the harness says, for its
+	// project MCP settings.
+	Dirs []string
+	// Continued: the harness says this stop already follows a stop hook's
+	// continuation (stop_hook_active, loop_count > 0).
+	Continued bool
+
+	raw      []byte // the input as the harness sent it, for its format
+	deferred []byte // for a ToolResult that can't be read yet (DeferredFormat)
+	// lateMeta (redeem by call, callredeem.go): reads the result's _meta
+	// later, for a ToolResult whose hook first redeems by call; nil
+	// otherwise.
+	lateMeta func() json.RawMessage
+	// contextEvent: the hook event a SessionContext is for, if not the
+	// session's start ("SubagentStart").
+	contextEvent string
+	// transcript: the conversation's own record, for a waiter whose
+	// conversation has no link (HistoryFormat).
+	transcript string
+	// turnEnded: the waiter runs because a turn ended (Claude Code's
+	// Stop, not SessionStart): what it handed over before has reached a
+	// turn (ConfirmAtTurnEnd).
+	turnEnded bool
+}
+
+// Output is what the hook hands back, in the harness's own format.
+type Output struct {
+	Stdout   []byte
+	Stderr   []byte
+	ExitCode int
+}
+
+// Format reads and writes one harness's hook JSON.
+type Format interface {
+	// Parse reads a hook call.
+	Parse(stdin []byte) (Input, error)
+	// Context is the output that adds text for the model after a tool call
+	// (ok false: the harness can't).
+	Context(in Input, text string) (Output, bool)
+	// Continue is the output that continues the session with text after a
+	// stop (or, for Rewake, wakes it).
+	Continue(in Input, text string) (Output, bool)
+}
+
+// Notes for the model. NoteConnected starts with "Wakeshift: connected"
+// (harnesses.Connected), what agents are told to look for; nothing else
+// Wakeshift says starts with it.
+const (
+	NoteConnected = "Wakeshift: connected. New messages for this conversation will reach it %s."
+	NoteFailed    = "Wakeshift: couldn't connect this conversation (%s), so new messages won't reach it yet. It tries again from the next result of the app's tools."
+	// NoteOtherApp: a beacon for another app than the one whose beacon
+	// connected the conversation, where the hook can't tell which server
+	// a result came from (it's never replaced without the user).
+	NoteOtherApp = "Wakeshift: this conversation stays connected to %q; a result asked to connect it to %q instead, and Wakeshift's hooks here don't switch apps by themselves. To switch, start a new conversation for it."
+	// NoteTaken: Wakeshift refused to move the conversation to another
+	// workspace's session (ErrTaken); its link stays.
+	NoteTaken = "Wakeshift: this conversation stays connected where it was: a result asked to connect it to a session of another account or workspace, and Wakeshift doesn't move a connected conversation. To connect it there, stop it being woken where it is first (the app's unwatch tool), or start a new conversation."
+	// NoteLinkNotHeld: Wakeshift refused the redeem because the result's
+	// own session is connected to hooks that hold its link, which these
+	// hooks didn't send (ErrLinkNotHeld): nothing about another account.
+	NoteLinkNotHeld = "Wakeshift: this conversation's session is already connected to hooks that hold its link, and Wakeshift's hooks here don't have that link, so it stays connected as it is. If the hooks here lost it (a reinstall, say), the app's next result connects the conversation again once that link has gone unused for 25 minutes."
+)
+
+// TakenNote is the note for a redeem refused as conversation_taken (err:
+// ErrTaken, or ErrLinkNotHeld where Wakeshift said why).
+func TakenNote(err error) string {
+	if errors.Is(err, ErrLinkNotHeld) {
+		return NoteLinkNotHeld
+	}
+	return NoteTaken
+}
+
+// Hook is one harness's hook entry point.
+type Hook struct {
+	Harness  string
+	Format   Format
+	Verifier *Verifier
+	Poller   Poller
+	Links    Links
+	HTTP     *http.Client
+	// When says, in NoteConnected, when messages arrive (e.g. "when the
+	// agent finishes a turn").
+	When string
+	// StopWait is how long a stop hook listens before letting the session
+	// stop (keep it under the harness's hook timeout).
+	StopWait time.Duration
+	// RewakeWait bounds an async rewake hook's wait (0: until the harness
+	// stops it).
+	RewakeWait time.Duration
+	// Unbound: accept beacons that name neither the conversation nor the
+	// call (harnesses that tell MCP servers neither; beacon.Binding).
+	Unbound bool
+	// Repoll is the longest single poll (the server may cap a wait).
+	Repoll time.Duration
+	// OnTransient, if set, is called when a beacon couldn't be redeemed
+	// only because Wakeshift was unreachable (ErrUnreachable): redeeming
+	// the same beacon again later may work.
+	OnTransient func()
+
+	// EventName is the event the command line names (--event), for
+	// formats whose input doesn't.
+	EventName string
+
+	// Rewake: this call is an async waiter (run with --rewake): a Stop or
+	// SessionStart becomes a Rewake.
+	Rewake bool
+	// WaiterKey, for a waiter: one waiter per key (Claude Code's process,
+	// CLAUDE_PID); a newer one makes an older one stop.
+	WaiterKey string
+	stale     func() bool
+	// Alive, if set, says whether the harness still runs (HarnessWatch):
+	// a listener stops when it doesn't, and hands nothing over.
+	Alive func() bool
+	// Parent, for a waiter, is the harness's process (Claude Code's
+	// CLAUDE_PID), watched while it waits (every ParentEvery): once it's
+	// gone the waiter stops at once, taking and handing over nothing, so
+	// it can't hold the stream for a process that has exited.
+	Parent int
+	// ConfirmAtTurnEnd, for a waiter: what it hands over is confirmed
+	// only once a turn has run with it, at the next waiter a turn's end
+	// starts in the same process (Claude Code's Stop), not as it's
+	// handed over. For sessions that may be one query whose process exits
+	// with no new turn (ClaudeStreaming): what it was handed comes again.
+	ConfirmAtTurnEnd bool
+	// InputClosed, for a waiter, says whether the harness's input has
+	// ended (Claude Code's stdin, ClaudeInputClosed): checked as it starts,
+	// every InputEvery while it waits, and before a handover. Once true the
+	// waiter stops, taking and handing over nothing: the session can't run
+	// another turn, and Claude Code holds its exit for the waiter (up to
+	// 30 s) otherwise.
+	InputClosed func() bool
+	// Pins: which app's beacons each MCP server carries (default: in the
+	// harness's settings directory).
+	Pins Pins
+	// ResolveSoon, if set, starts a resolver for the conversation (a
+	// detached `hook --event resolve`) when a tool result is deferred, so
+	// its beacon is redeemed the moment the harness writes the result, not
+	// at the next turn: by the time the model could repeat it, it's used.
+	ResolveSoon func(conversation string)
+
+	// patient: this call listens as a waiter (Rewake), so its polls wait
+	// out the agent's own wait command rather than stopping for it.
+	patient bool
+	// why is why the last listen or take stopped, for a waiter's log
+	// (logExit).
+	why string
+	// WaitCommand, if set, is Wakeshift's wait command on this machine
+	// (connector.WaitCommand), which a redeem tells Wakeshift so its
+	// instructions can give it: harnesses woken by a command the agent
+	// starts in the background (Spec.Wait).
+	WaitCommand string
+	// RecordProcs: record the harness process each hook of a connected
+	// conversation runs under, for `wakeshift wait` (RecordProcess), where
+	// the harness doesn't tell commands their conversation.
+	RecordProcs bool
+	// Tools, if set, pre-approves an app's MCP tools the user agreed to
+	// when the hook connects a conversation to it (toolrules.go).
+	Tools *ToolRules
+	// Headline: what the hook hands over starts with framing.Headline
+	// (Spec.Headline).
+	Headline bool
+	// Bin is this binary's path, for the commands notes give.
+	Bin string
+
+	// handed confirms what this call's output hands over: Run calls it
+	// once the output is written (at least once: what the harness wasn't
+	// handed comes again).
+	handed func()
+	// takenIDs are the deliveries the last take returned.
+	takenIDs []string
+}
+
+func (h *Hook) pins() Pins {
+	if h.Pins.Path == "" {
+		return PinsFor(h.Verifier.Settings)
+	}
+	return h.Pins
+}
+
+// Run handles one hook call. It never fails the harness's call: anything it
+// can't do, it leaves alone.
+func (h *Hook) Run(ctx context.Context, stdin io.Reader, stdout, stderr io.Writer) int {
+	b, err := io.ReadAll(io.LimitReader(stdin, 16<<20))
+	if err != nil {
+		return 0
+	}
+	if h.EventName == ClaudeClaimSendEvent && h.Harness == claudeName {
+		h.sendClaimDetached(ctx, b) // detached: nothing waits on it
+		return 0
+	}
+	if h.EventName == ClaudeClaimEvent && h.Harness == claudeName {
+		// Redeem by call (callredeem.go): PreToolUse's claim. It prints nothing and
+		// exits 0 whatever happens, so the call goes on.
+		h.claimCall(ctx, b)
+		return 0
+	}
+	var in Input
+	if ef, ok := h.Format.(EventFormat); ok && h.EventName != "" {
+		in, err = ef.ParseEvent(h.EventName, b)
+	} else {
+		in, err = h.Format.Parse(b)
+	}
+	if err == nil && in.Event == Approve {
+		// It decides by the tool and its command alone: no conversation
+		// needed.
+		if out, ok := h.approve(in); ok {
+			stdout.Write(out.Stdout)
+		}
+		return 0
+	}
+	if err != nil || in.Conversation == "" {
+		return 0
+	}
+	if h.aliased() {
+		switch in.Event {
+		case PreCall:
+			// Each server is told its own name for the conversation, and
+			// only a server the harness names is told anything.
+			if in.ServerConversation = h.serverConversation(in.Server, in.Conversation); in.ServerConversation == "" {
+				return 0
+			}
+			h.recordCall(in)
+		case ToolResult:
+			in.Server, in.MCPTool = h.serverOf(in)
+			in.ServerConversation = h.serverConversation(in.Server, in.Conversation)
+		}
+	}
+	if cs, ok := h.Format.(CallServerFormat); ok && cs.CallServers() {
+		switch in.Event {
+		case CallDone:
+			if in.Server != "" && in.ToolCallID != "" {
+				h.recordCall(in)
+			}
+			return 0
+		case ToolResult:
+			in.Server, in.ServerURL = h.calledServer(in)
+		}
+	}
+	if in.Event == TurnStart || in.Event == Stop || in.Event == Rewake {
+		h.resolveDeferred(ctx, in)
+	}
+	if h.RecordProcs && in.Event != Resolve { // a resolver runs detached, under no harness
+		defer func() {
+			if h.Links.Load(in.Conversation) != "" {
+				RecordProcess(h.Harness, in.Conversation)
+			}
+		}()
+	}
+	var out Output
+	var ok bool
+	switch in.Event {
+	case ToolResult:
+		out, ok = h.toolResult(ctx, in)
+	case TurnStart:
+		out, ok = h.turnStart(ctx, in)
+	case PreCall:
+		if pf, is := h.Format.(PreCallFormat); is {
+			out, ok = pf.PreCall(in)
+		}
+	case SessionContext:
+		if wf, is := h.Format.(WaitMarkFormat); is && wf.MarkNeedsWait() && h.WaitCommand == "" {
+			break
+		}
+		if sf, is := h.Format.(SessionContextFormat); is {
+			// The plugin's install leaves its issuer's file; the
+			// installer's hooks (in user settings) don't have one.
+			set := h.Verifier.Settings
+			hooks := set.Dir != "" && !exists(filepath.Join(set.Dir, PluginIssuerFile))
+			mark := pluginmark.Value(h.Harness, version.Version, set.Issuers)
+			if hooks {
+				mark = pluginmark.HooksValue(h.Harness, version.Version, set.Issuers)
+			}
+			if cf, is := h.Format.(ContextForFormat); is && in.contextEvent != "" {
+				out, ok = cf.ContextFor(in.contextEvent, mark, hooks)
+			} else {
+				out, ok = sf.SessionContext(mark, hooks)
+			}
+		}
+	case Resolve:
+		h.resolveSoon(ctx, in)
+	case Stop, Rewake:
+		if h.Rewake || in.Event == Rewake {
+			started := time.Now()
+			inputEnded := func() bool { return false }
+			if h.Parent > 0 || h.InputClosed != nil {
+				var stop func()
+				ctx, stop, inputEnded = h.watchParent(ctx)
+				defer stop()
+			}
+			if h.inputClosed() {
+				// A one-shot query (or a host closing the session) that
+				// ended before this waiter started: nothing to wait for.
+				if h.ConfirmAtTurnEnd && in.turnEnded {
+					h.confirmHanded(ctx, in.Conversation)
+				}
+				h.why = "Claude's input has closed"
+				h.logExit(in.Conversation, started)
+				return 0
+			}
+			h.claimWaiter()
+			h.patient = true
+			if h.ConfirmAtTurnEnd && in.turnEnded {
+				// A turn ran since this process's last handover: confirm it
+				// before polling, or the poll hands it out again.
+				h.confirmHanded(ctx, in.Conversation)
+			}
+			if RedeemByCallEnabled() && h.Harness == claudeName {
+				// Redeem by call's old session keys, at most once a day:
+				// a waiter runs in the background, unlike the claim.
+				SweepSessionKeys(h.Verifier.Settings.Dir, time.Now())
+			}
+			// The claim relay, while this waiter listens (claimd.go).
+			stopClaims := h.serveClaims(ctx, in.Conversation, in.transcript)
+			out, ok = h.listen(ctx, in, h.RewakeWait)
+			stopClaims()
+			if inputEnded() {
+				h.why = "Claude's input has closed"
+			}
+			h.logExit(in.Conversation, started)
+		} else {
+			out, ok = h.listen(ctx, in, h.StopWait)
+		}
+	}
+	if !ok {
+		return 0
+	}
+	_, err1 := stdout.Write(out.Stdout)
+	_, err2 := stderr.Write(out.Stderr)
+	// Confirmed only once it's handed over: written where the harness
+	// reads it (a write that failed hands over nothing).
+	handed := h.handed
+	h.handed = nil
+	if err1 != nil || err2 != nil {
+		return 0 // nothing reached the harness: don't wake it with nothing
+	}
+	if handed != nil {
+		handed()
+	}
+	return out.ExitCode
+}
+
+// approve approves the harness's shell running Wakeshift's wait command
+// (WaitCommand), exactly as Wakeshift's instructions give it: the binary's
+// absolute path and "wait", with nothing added (no argument, redirect,
+// pipe or second command: the whole command must be that text), and only
+// while the binary is the user's own (ownedByUser, as for Claude Code's
+// rule), and only while the user has no rule of the harness's that denies
+// or asks for it (ApproveFormat.Denied, which also says yes when it can't
+// tell). Anything else gets no answer, so the harness asks the user (or
+// applies their rule) as it would have. It reads no links and makes no
+// request, so it answers at once.
+func (h *Hook) approve(in Input) (Output, bool) {
+	af, ok := h.Format.(ApproveFormat)
+	if !ok || h.WaitCommand == "" || !af.Shell(in.ToolName) || strings.TrimSpace(in.Command) != h.WaitCommand {
+		return Output{}, false
+	}
+	if bin := strings.TrimSuffix(h.WaitCommand, " wait"); WaitCommand(bin) != h.WaitCommand || ownedByUser(bin) != nil {
+		return Output{}, false
+	}
+	if af.Denied(h.WaitCommand) {
+		return Output{}, false
+	}
+	return af.Approve(), true
+}
+
+// toolResult connects the conversation on a beacon for it, and hands over
+// anything already waiting.
+func (h *Hook) toolResult(ctx context.Context, in Input) (Output, bool) {
+	if in.ToolResult == nil && in.deferred != nil {
+		// The result isn't readable yet (Antigravity writes it after this
+		// hook returns): the conversation's next hook reads it.
+		h.deferResult(in)
+		if h.ResolveSoon != nil {
+			h.ResolveSoon(in.Conversation)
+		}
+		return Output{}, false
+	}
+	var notes []string
+	token, carried := FindBeacon(in.ToolResult)
+	if in.lateMeta != nil && token == "" {
+		// Redeem by call (callredeem.go): a claimed call by its ID, else
+		// the result's _meta from the transcript, as before. Only when the
+		// input has no beacon: one in the input is redeemed at once, with
+		// no wait for the transcript, so there's nothing to bypass.
+		r := h.callFirst(ctx, in)
+		if r.done {
+			if r.note != "" {
+				notes = append(notes, r.note)
+			}
+			return h.resultNotes(ctx, in, "", notes)
+		}
+		ctx, in = r.ctx, r.in
+		token, carried = FindBeacon(in.ToolResult)
+		started := time.Now()
+		n := h.connect(ctx, in, token, carried)
+		h.logBeacon(ctx, in.Conversation, token, n, started)
+		if n != "" {
+			notes = append(notes, n)
+		}
+		return h.resultNotes(ctx, in, token, notes)
+	}
+	if n := h.connect(ctx, in, token, carried); n != "" {
+		notes = append(notes, n)
+	}
+	return h.resultNotes(ctx, in, token, notes)
+}
+
+// resultNotes is the rest of toolResult, once the conversation's beacon
+// (or call) was acted on: the wait command's note, then what's waiting or
+// the notes, as the harness's context.
+func (h *Hook) resultNotes(ctx context.Context, in Input, token string, notes []string) (Output, bool) {
+	if n := h.waitNotRunning(in, token); n != "" {
+		notes = append(notes, n)
+	}
+	late, _ := h.Format.(LateContextFormat)
+	// A harness that shows this hook's context only later (Claude Code: at
+	// the next user prompt) isn't handed messages here: they'd count as
+	// delivered and not reach the model. Nor does this hook poll the
+	// stream there: it would take it from the conversation's waiter, which
+	// delivers them.
+	if late == nil || !late.LateContext() {
+		if text, ack := h.take(ctx, in.Conversation, 0, true); text != "" {
+			out, ok := h.Format.Context(in, strings.Join(append(notes, text), "\n\n"))
+			if ok {
+				h.handed = ack
+				return out, true
+			}
+		}
+	}
+	if len(notes) == 0 {
+		// Every beacon line goes from what the model sees, the one acted on
+		// and any other (relayed text, a beacon not for here).
+		if sf, is := h.Format.(StripFormat); is && (token != "" || HasBeaconText(in.ToolResult)) {
+			return sf.Strip(in)
+		}
+		return Output{}, false
+	}
+	out, ok := h.Format.Context(in, strings.Join(notes, "\n\n"))
+	if !ok || late != nil && late.LateContext() {
+		// Said at the next turn's start, or with the next wake, whichever
+		// comes first.
+		h.saveNote(in.Conversation, strings.Join(notes, "\n\n"))
+	}
+	return out, ok
+}
+
+// NoteWaitStopped: the conversation's wait command isn't running here, so
+// the result's "already running" (the core counts a wait as live for a
+// while after its last request) is about one that ended.
+const NoteWaitStopped = "Wakeshift: your wait command isn't running on this machine (it stops when the program you run in restarts, or when the command is stopped), whatever this result says about it. Start it again now in the background, the way this result says to start it: %s"
+
+// waitNotRunning is NoteWaitStopped for a Wakeshift result (it carried a
+// beacon) in a connected conversation of a harness woken by Wakeshift's
+// wait command, while no wait command holds the conversation's lock
+// (Links.WaitRunning); "" otherwise.
+func (h *Hook) waitNotRunning(in Input, token string) string {
+	if h.WaitCommand == "" || token == "" || h.Links.Load(in.Conversation) == "" || h.Links.WaitRunning(in.Conversation) {
+		return ""
+	}
+	return fmt.Sprintf(NoteWaitStopped, "`"+h.WaitCommand+"`")
+}
+
+// LateContextFormat is a Format whose tool-result hooks' context reaches
+// the model late (Claude Code shows an async hook's additionalContext only
+// at the next user prompt): a note it adds is also kept for the next wake.
+type LateContextFormat interface {
+	LateContext() bool
+}
+
+// turnStart hands over a note saved for the conversation and anything
+// waiting, before a turn.
+func (h *Hook) turnStart(ctx context.Context, in Input) (Output, bool) {
+	var parts []string
+	if n := h.takeNote(in.Conversation); n != "" {
+		parts = append(parts, n)
+	}
+	text, ack := h.take(ctx, in.Conversation, 0, true)
+	if text != "" {
+		parts = append(parts, text)
+	}
+	if len(parts) == 0 {
+		return Output{}, false
+	}
+	out, ok := h.Format.Context(in, strings.Join(parts, "\n\n"))
+	if ok && text != "" {
+		h.handed = ack
+	}
+	return out, ok
+}
+
+func (h *Hook) notePath(conversation string) string {
+	return filepath.Join(h.Verifier.Settings.Dir, "notes", filepath.Base(h.Links.path(conversation)))
+}
+
+// saveNote adds note to the conversation's note for later: to what's
+// there, so a note saved earlier (a claim taken at PreToolUse) isn't lost
+// to the result's own, and once.
+func (h *Hook) saveNote(conversation, note string) {
+	p := h.notePath(conversation)
+	if os.MkdirAll(filepath.Dir(p), 0o700) != nil {
+		return
+	}
+	if unlock, err := lockFile(filepath.Join(filepath.Dir(p), ".lock")); err == nil {
+		defer unlock() // two hooks adding at once both keep theirs
+	}
+	if b, err := os.ReadFile(p); err == nil && len(b) > 0 {
+		if strings.Contains(string(b), note) {
+			return
+		}
+		note = string(b) + "\n\n" + note
+	}
+	os.WriteFile(p, []byte(note), 0o600)
+}
+
+func (h *Hook) takeNote(conversation string) string {
+	p := h.notePath(conversation)
+	if unlock, err := lockFile(filepath.Join(filepath.Dir(p), ".lock")); err == nil {
+		defer unlock()
+	}
+	b, err := os.ReadFile(p)
+	if err != nil {
+		return ""
+	}
+	os.Remove(p)
+	return string(b)
+}
+
+// listen waits up to wait (0: until ctx ends) for the conversation's
+// messages and continues the session with them.
+func (h *Hook) listen(ctx context.Context, in Input, wait time.Duration) (Output, bool) {
+	if wait > 0 {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, wait)
+		defer cancel()
+	}
+	if h.Links.Load(in.Conversation) == "" {
+		// A waiter can start before the turn's beacon is redeemed (Claude
+		// Code runs the Stop hook while the async PostToolUse that
+		// connects the conversation is still running): give the link a
+		// little while to appear.
+		h.why = "no link for the conversation"
+		if !h.Rewake && in.Event != Rewake {
+			return Output{}, false
+		}
+		// Still none after LinkGrace: the result's hook may have missed
+		// its beacon (missedRedeem).
+		if !h.installedSince(ctx, in) && !h.waitForLink(ctx, in.Conversation) && !h.missedRedeem(ctx, in) {
+			// Still none: if a result promised the plugin connects this
+			// conversation, say it isn't connected (unconnected).
+			return h.unconnected(ctx, in)
+		}
+	}
+	if h.ConfirmAtTurnEnd && !in.turnEnded && !h.awaitTurnEnd(ctx, in.Conversation) {
+		return Output{}, false
+	}
+	text, ack := h.take(ctx, in.Conversation, wait, false)
+	if text == "" {
+		return Output{}, false
+	}
+	ids := h.takenIDs
+	if h.inputClosed() {
+		h.why = "Claude's input closed before the messages could be handed over"
+		return Output{}, false // not acknowledged: Wakeshift hands it out again
+	}
+	if h.Parent > 0 && !alive(h.Parent) {
+		h.why = "the harness quit before the messages could be handed over"
+		return Output{}, false // not acknowledged: Wakeshift hands it out again
+	}
+	if h.Alive != nil && !h.Alive() {
+		h.why = "the harness quit before the messages could be handed over"
+		return Output{}, false // not acknowledged: Wakeshift hands it out again
+	}
+	if SwitchedOff() {
+		h.why = "Wakeshift was turned off on this machine (wakeshift disable)"
+		return Output{}, false // not acknowledged: Wakeshift hands it out again
+	}
+	h.why = "handed messages over"
+	// A note saved for the next turn's start (the conversation connected
+	// in a hook that couldn't add context) comes with this wake instead.
+	note := h.takeNote(in.Conversation)
+	if note != "" {
+		if head, rest, ok := strings.Cut(text, "\n"); h.Headline && ok {
+			text = head + "\n" + note + "\n\n" + rest // the headline stays first
+		} else {
+			text = note + "\n\n" + text
+		}
+	}
+	out, ok := h.Format.Continue(in, text)
+	switch {
+	case ok && h.ConfirmAtTurnEnd && h.handedPath(in.Conversation) != "":
+		// Kept for the woken turn's end to confirm (confirmHanded): this
+		// process may be one query that exits without that turn.
+		h.handed = func() { h.saveHanded(in.Conversation, ids) }
+	case ok:
+		h.handed = ack // once it's written (Run)
+	default:
+		h.why = "the harness's format can't continue the session"
+		if note != "" {
+			h.saveNote(in.Conversation, note)
+		}
+	}
+	return out, ok
+}
+
+// take polls the conversation's links once (immediate), or until there
+// are deliveries or wait runs out (0: until ctx ends), and returns them
+// framed, with a func that acknowledges them (call it once they're handed
+// over). A conversation connected to several apps has a link for each:
+// every one is polled at once, and the first to hand out messages ends the
+// others' waits (each acknowledged on its own link).
+func (h *Hook) take(ctx context.Context, conversation string, wait time.Duration, immediate bool) (string, func()) {
+	h.takenIDs = nil
+	links := h.Links.All(conversation)
+	if len(links) == 0 {
+		h.why = "no link for the conversation"
+		return "", nil
+	}
+	if len(links) == 1 {
+		ds, ack, why := h.takeOne(ctx, conversation, links[0], wait, immediate)
+		h.why = why
+		if len(ds) == 0 {
+			return "", nil
+		}
+		h.takenIDs = deliveryIDs(ds)
+		return h.prompt(ds), ack
+	}
+	type got struct {
+		ds  []Delivery
+		ack func()
+		why string
+	}
+	out := make([]got, len(links))
+	cctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	var wg sync.WaitGroup
+	for i, k := range links {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			ds, ack, why := h.takeOne(cctx, conversation, k, wait, immediate)
+			out[i] = got{ds, ack, why}
+			if len(ds) > 0 && !immediate {
+				cancel() // the others stop waiting: these are handed over now
+			}
+		}()
+	}
+	wg.Wait()
+	var ds []Delivery
+	var acks []func()
+	h.why = out[0].why
+	for _, g := range out {
+		if len(g.ds) > 0 {
+			ds = append(ds, g.ds...)
+			acks = append(acks, g.ack)
+			h.why = g.why
+		}
+	}
+	if len(ds) == 0 {
+		return "", nil
+	}
+	h.takenIDs = deliveryIDs(ds)
+	return h.prompt(ds), func() {
+		for _, a := range acks {
+			a()
+		}
+	}
+}
+
+// takeOne is take on one of the conversation's links: its deliveries (none
+// if it stopped first), the func that acknowledges them, and why it
+// stopped listening otherwise (the waiter's log).
+func (h *Hook) takeOne(ctx context.Context, conversation string, held Link, wait time.Duration, immediate bool) ([]Delivery, func(), string) {
+	var why string
+	link := held.Link
+	deadline := time.Time{}
+	if wait > 0 {
+		deadline = time.Now().Add(wait)
+	}
+	// The poll's answer has to arrive before ctx ends (listen's ctx ends
+	// at the same moment as wait): asked to wait right up to it, the
+	// server's answer, with any deliveries and the link's rotation, would
+	// be cut off. Leave it room.
+	if d, ok := ctx.Deadline(); ok {
+		reserve := min(time.Until(d)/5, answerReserve)
+		if end := d.Add(-reserve); deadline.IsZero() || end.Before(deadline) {
+			deadline = end
+		}
+	}
+	repoll := h.Repoll
+	if repoll <= 0 {
+		repoll = 25 * time.Second
+	}
+	expired := 0 // polls answered link_expired (ErrLinkExpired)
+	for backoff, first := time.Second, true; ; first = false {
+		w := repoll
+		if !deadline.IsZero() {
+			w = min(w, time.Until(deadline).Truncate(time.Millisecond))
+			if w < minPoll && !first { // the first poll always looks once
+				why = "listened as long as it may"
+				return nil, nil, why
+			}
+		}
+		if immediate || w < 0 {
+			w = 0
+		}
+		started := time.Now()
+		patient := h.patient && !immediate
+		b, err := h.Poller.Poll(ctx, link, w, patient)
+		var outdated *UpdateRequired
+		if errors.As(err, &outdated) {
+			// Kept: the updated hooks use the same link. The app's tool
+			// results ask the agent for the update meanwhile.
+			why = "Wakeshift's hooks are out of date"
+			return nil, nil, why
+		}
+		var off *ErrOffOrigin
+		if errors.As(err, &off) {
+			// Never dialed (CheckStreamLink said so on stderr); kept, in
+			// case the Wakeshift it's for is trusted again.
+			why = "the link isn't on a trusted Wakeshift's origin"
+			return nil, nil, why
+		}
+		switch err {
+		case ErrLinkGone:
+			if next := h.forgetRevoked(conversation, held.App, link); next != "" {
+				// A redeem replaced it (a resumed conversation that
+				// watches again): listen on the new one.
+				link = next
+				why = "the link was revoked; listening on its successor"
+				continue
+			}
+			why = "the link was revoked"
+			if h.stale != nil && h.stale() {
+				why = "the link was revoked; a newer waiter took over"
+			}
+			return nil, nil, why
+		case ErrLinkExpired:
+			// Wakeshift renews a link that expired while nothing polled it
+			// (the computer slept), answering with its successor: kept, and
+			// tried again after the pause below, a few times, in case an
+			// instance from before the renewal answered. Then it's dropped.
+			if expired++; expired > expiredRetries {
+				h.Links.ForgetLink(conversation, link)
+				why = "the link expired and Wakeshift didn't renew it"
+				return nil, nil, why
+			}
+			why = "the link expired; trying again for its renewal"
+		case ErrReplaced:
+			switch {
+			case h.stale != nil && h.stale():
+				why = "a newer waiter took over"
+				return nil, nil, why
+			case !h.patient || h.stale == nil || h.Alive != nil && !h.Alive():
+				// Another hook of this conversation is listening.
+				why = "another poll took the stream (a newer hook)"
+				return nil, nil, why
+			}
+			// The newest waiter: another hook polled for a moment (a turn's
+			// tool hook); take the stream back after a pause, so the
+			// conversation isn't left with nothing listening.
+		}
+		if b.Link != "" && b.Link != link && SameOrigin(b.Link, link) {
+			h.Links.Rotate(conversation, link, b.Link)
+			link = b.Link
+		}
+		if err == nil && b.Background && !patient {
+			// The agent's own wait command wakes it. A waiter keeps
+			// listening: the server waited, and takes the stream for it as
+			// soon as that command stops counting as live.
+			why = "the agent's wait command holds the stream"
+			return nil, nil, why
+		}
+		if err == nil && len(b.Deliveries) > 0 {
+			ids := make([]string, len(b.Deliveries))
+			for i, d := range b.Deliveries {
+				ids[i] = d.ID
+			}
+			l := link
+			return b.Deliveries, func() {
+				actx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
+				defer cancel()
+				h.Poller.Ack(actx, l, ids) // unacknowledged, they come back: at least once
+			}, ""
+		}
+		switch {
+		case immediate:
+			why = "nothing waiting"
+			return nil, nil, why
+		case ctx.Err() != nil:
+			why = "stopped by the harness"
+			return nil, nil, why
+		case !deadline.IsZero() && !time.Now().Before(deadline):
+			why = "listened as long as it may"
+			return nil, nil, why
+		case h.stale != nil && h.stale():
+			why = "a newer waiter took over"
+			return nil, nil, why
+		case h.Alive != nil && !h.Alive():
+			why = "the harness quit"
+			return nil, nil, why
+		}
+		// Wakeshift unreachable, or answering at once with nothing when asked
+		// to wait: don't spin.
+		if err != nil || w > 0 && time.Since(started) < w/2 {
+			pause := backoff
+			var busy *Busy
+			if errors.As(err, &busy) {
+				pause = max(pause, busy.After) // at capacity: come back when it says
+				// Past the deadline once paused (or with too little left to
+				// poll): stop now rather than wait for nothing.
+				if !deadline.IsZero() && time.Until(deadline)-pause < minPoll {
+					why = "Wakeshift was busy until the end of its listening time"
+					return nil, nil, why
+				}
+			}
+			select {
+			case <-ctx.Done():
+				why = "stopped by the harness"
+				return nil, nil, why
+			case <-time.After(pause):
+			}
+			backoff = min(backoff*2, 30*time.Second)
+		} else {
+			backoff = time.Second
+		}
+	}
+}
+
+// expiredRetries is how many more times a listener polls a link answered
+// link_expired (ErrLinkExpired), pausing between, before it drops it.
+const expiredRetries = 3
+
+// minPoll is the shortest wait worth polling for once the deadline nears.
+const minPoll = 100 * time.Millisecond
+
+// answerReserve is the most of a hook's time left for a poll's answer to
+// arrive after the server stops waiting (a fifth of it, for a short one).
+const answerReserve = 2 * time.Second
+
+// forgetRevoked forgets the conversation's revoked link and returns the
+// link that replaced it, the conversation's link for app, if a redeem on
+// this machine replaced it; "" otherwise (an unwatch, or a revocation from
+// elsewhere). A redeem revokes the link it supersedes (the conversation's
+// earlier session: a resumed conversation that calls watch again) before
+// its hook saves the new one, all while the hook holds LockRedeems, so a
+// waiter told its link was revoked takes that lock before it forgets and
+// reads: the new link is saved by then, and no redeem starts in between
+// (one would hand back no link, as the conversation's). A conversation keeps one
+// link per app (Links), and only a redeem or a rotation for that app
+// replaces it, so a different one there is the revoked link's replacement:
+// the link a waiter started now would listen on. Only a link on the same
+// server as the revoked one, and only for a link that names its app: one
+// that names none can't be told from another app's. Not for a waiter a
+// newer one replaced (claimWaiter), which listens on that link itself; and
+// should two listeners still meet on it, the stream takes the newer poll
+// and the other stops (ErrReplaced), as for any two.
+func (h *Hook) forgetRevoked(conversation, app, revoked string) string {
+	if app == "" || h.stale != nil && h.stale() {
+		h.Links.ForgetLink(conversation, revoked)
+		return ""
+	}
+	unlock := h.Links.LockRedeems()
+	defer unlock()
+	h.Links.ForgetLink(conversation, revoked)
+	if h.stale != nil && h.stale() {
+		return ""
+	}
+	next := h.Links.LoadFor(conversation, app)
+	if next == revoked || !SameOrigin(next, revoked) {
+		return ""
+	}
+	return next
+}
+
+// SameOrigin says whether two links are on the same server (scheme and
+// host): a link is only ever swapped for another on its own server.
+func SameOrigin(a, b string) bool {
+	ua, err1 := url.Parse(a)
+	ub, err2 := url.Parse(b)
+	return err1 == nil && err2 == nil && ua.Scheme == ub.Scheme && ua.Host == ub.Host
+}
+
+// claimWaiter makes this the waiter for its key: it writes a fresh token to
+// <dir>/waiters/<key>, and stops listening once the file holds another's.
+func (h *Hook) claimWaiter() {
+	if h.WaiterKey == "" || !waiterKeyRE.MatchString(h.WaiterKey) {
+		return
+	}
+	dir := filepath.Join(h.Verifier.Settings.Dir, "waiters")
+	if os.MkdirAll(dir, 0o700) != nil {
+		return
+	}
+	if entries, err := os.ReadDir(dir); err == nil { // waiters outlive no hook timeout (a day)
+		for _, e := range entries {
+			if info, err := e.Info(); err == nil && time.Since(info.ModTime()) > 25*time.Hour {
+				os.Remove(filepath.Join(dir, e.Name()))
+			}
+		}
+	}
+	path := filepath.Join(dir, h.WaiterKey)
+	tok := make([]byte, 16)
+	rand.Read(tok)
+	mine := hex.EncodeToString(tok)
+	if os.WriteFile(path, []byte(mine), 0o600) != nil {
+		return
+	}
+	h.stale = func() bool {
+		b, err := os.ReadFile(path)
+		return err == nil && string(b) != mine
+	}
+}
+
+var waiterKeyRE = regexp.MustCompile(`^[0-9A-Za-z_-]{1,64}$`)
+
+// LinkGrace is how long a waiter waits for its conversation's link to
+// appear before giving up (the next turn's waiter tries again).
+var LinkGrace = 2 * time.Minute
+
+func (h *Hook) waitForLink(ctx context.Context, conversation string) bool {
+	deadline := time.After(LinkGrace)
+	for h.Links.Load(conversation) == "" {
+		if h.stale != nil && h.stale() {
+			return false
+		}
+		select {
+		case <-ctx.Done():
+			return false
+		case <-deadline:
+			return false
+		case <-time.After(200 * time.Millisecond):
+		}
+	}
+	return true
+}

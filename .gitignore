@@ -1,0 +1,16 @@
+# Build output.
+/bin/
+/web/dist/*
+!/web/dist/.gitkeep
+node_modules/
+
+# Local settings, which can hold keys.
+.env
+.env.*
+!.env.example
+.claude/settings.local.json
+
+# Editors and the OS.
+.DS_Store
+.idea/
+.vscode/

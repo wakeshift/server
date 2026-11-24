@@ -1,0 +1,123 @@
+"""Requests the load balancer refused are sent again (the Node SDK's retry.test.ts)."""
+
+from __future__ import annotations
+
+import json
+from collections.abc import Callable
+from typing import Any
+
+import httpx2
+import pytest
+
+from wakeshift import APIError, Wakeshift
+from wakeshift._retry import refused
+
+from .helpers import app_key
+
+# Google's front end's 500 page, as a retired Cloud Run revision answers through the load balancer.
+GFE_PAGE = """<html><head>
+<meta http-equiv="content-type" content="text/html;charset=utf-8">
+<title>500 Server Error</title>
+</head>
+<body text=#000000 bgcolor=#ffffff>
+<h1>Error: Server Error</h1>
+<h2>The server encountered an error and could not complete your request.<p>Please try again in 30 seconds.</h2>
+<h2></h2>
+</body></html>"""
+
+
+def gfe500() -> httpx2.Response:
+    return httpx2.Response(500, text=GFE_PAGE, headers={"Content-Type": "text/html; charset=UTF-8"})
+
+
+def as_json(status: int, body: object) -> Callable[[], httpx2.Response]:
+    return lambda: httpx2.Response(status, content=json.dumps(body), headers={"Content-Type": "application/json"})
+
+
+def scripted(answers: list[Callable[[], httpx2.Response]]) -> tuple[list[bytes], Wakeshift]:
+    bodies: list[bytes] = []
+
+    def handler(r: httpx2.Request) -> httpx2.Response:
+        bodies.append(r.content)
+        return answers[min(len(bodies), len(answers)) - 1]()
+
+    wake = Wakeshift(app_key(), core="https://core.test", http_client=httpx2.AsyncClient(transport=httpx2.MockTransport(handler)))
+    wake._retry_pauses = (0.001, 0.001)  # pyright: ignore[reportPrivateUsage]
+    return bodies, wake
+
+
+async def test_a_post_the_load_balancer_refused_is_sent_again_body_and_all() -> None:
+    bodies, wake = scripted([gfe500, as_json(200, {"forgotten": True})])
+    assert await wake.forget_user("ada") is True
+    assert len(bodies) == 2
+    assert bodies[0] == bodies[1]
+
+
+async def test_wakeshifts_own_errors_arent_retried_and_a_refusal_that_keeps_coming_is_the_error() -> None:
+    bodies, wake = scripted([as_json(500, {"error": {"code": "internal", "message": "x"}})])
+    with pytest.raises(APIError) as e:
+        await wake.forget_user("ada")
+    assert e.value.status == 500
+    assert len(bodies) == 1
+
+    bodies, wake = scripted([gfe500])
+    with pytest.raises(APIError) as e:
+        await wake.forget_user("ada")
+    assert e.value.status == 500
+    assert len(bodies) == 3
+    assert "Server Error" in e.value.detail
+
+
+@pytest.mark.parametrize(
+    ("method", "resp", "want"),
+    [
+        ("POST", httpx2.Response(500, text="<p>oops</p>", headers={"Content-Type": "text/html"}), False),
+        ("GET", httpx2.Response(503, text="Service Unavailable", headers={"Content-Type": "text/html"}), True),
+        ("POST", httpx2.Response(503, text="Service Unavailable", headers={"Content-Type": "text/html"}), False),
+        ("GET", httpx2.Response(503, json={"error": {"code": "unavailable"}}), False),
+        ("POST", gfe500(), True),
+        ("GET", httpx2.Response(404, text="Not Found", headers={"Content-Type": "text/html"}), False),
+    ],
+)
+def test_which_answers_are_retried(method: str, resp: httpx2.Response, want: bool) -> None:
+    assert refused(method, resp) is want
+
+
+@pytest.mark.parametrize(("max_retries", "tries", "ok"), [(2, 3, True), (0, 1, False), (1, 2, False)])
+async def test_a_connection_that_fails_is_retried_up_to_max_retries(max_retries: int, tries: int, ok: bool) -> None:
+    from wakeshift import APIConnectionError
+
+    calls: list[dict[str, Any]] = []
+
+    def handler(r: httpx2.Request) -> httpx2.Response:
+        calls.append(json.loads(r.content) if r.content else {})
+        if len(calls) < 3:
+            raise httpx2.ConnectError("connection refused")
+        return httpx2.Response(200, json={"matched": 1})
+
+    wake = Wakeshift(
+        app_key(),
+        core="https://core.test",
+        max_retries=max_retries,
+        http_client=httpx2.AsyncClient(transport=httpx2.MockTransport(handler)),
+    )
+    wake._retry_pauses = (0.0,)
+    ev = wake.define_event(
+        "table.news",
+        description="News",
+        args={"type": "object", "properties": {"t": {"type": "string"}}, "required": ["t"]},
+        payload={"type": "object"},
+    )
+    if ok:
+        assert (await ev.emit({"t": "x"}, {})).matched == 1
+    else:
+        with pytest.raises(APIConnectionError):
+            await ev.emit({"t": "x"}, {})
+    emits = [c for c in calls if "payload" in c]
+    assert len(emits) == tries, (max_retries, len(emits))
+    ids = {c.get("id") for c in emits}
+    if max_retries:
+        # The SDK's own id, the same on every attempt: a retry wakes nobody twice.
+        assert len(ids) == 1 and next(iter(ids)).startswith("sdk-")
+    else:
+        assert ids == {None}, "nothing is sent again, so no id is needed"

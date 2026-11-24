@@ -1,0 +1,23 @@
+#!/bin/sh
+# wakebench: builds what it needs (the SDK, the bench), then runs it.
+#   bench/run --harness claude-code,codex --target local --scenarios S1-S9
+#   bench/run --only-report <run-id>
+# See bench/README.md.
+set -eu
+bench=$(cd "$(dirname "$0")" && pwd)
+# The build never sees an API key the bench is given (npm's install scripts
+# run third-party code): only the bench itself does. Every *_API_KEY
+# variable is left out, CURSOR_API_KEY and ANTHROPIC_API_KEY among them.
+nokeys() {
+  for k in $(env | sed -n 's/^\([A-Za-z_][A-Za-z0-9_]*_API_KEY\)=.*/\1/p'); do set -- -u "$k" "$@"; done
+  env "$@"
+}
+sdk="$bench/../sdk/typescript"
+if [ ! -f "$sdk/dist/index.js" ]; then
+  (cd "$sdk" && nokeys npm ci --no-fund --no-audit --silent && nokeys npm run build --silent) >&2
+fi
+if [ ! -d "$bench/node_modules" ]; then
+  (cd "$bench" && nokeys npm ci --no-fund --no-audit --silent) >&2
+fi
+(cd "$bench" && nokeys npx tsc -p tsconfig.json) >&2
+exec node "$bench/dist/src/cli.js" "$@"

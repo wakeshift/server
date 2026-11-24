@@ -1,0 +1,6 @@
+node_modules/
+dist/
+app/python/.venv/
+__pycache__/
+node_modules/
+.install-lock/

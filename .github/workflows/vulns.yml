@@ -1,0 +1,52 @@
+name: Vulnerabilities
+
+# Known vulnerabilities in what the server ships: its Go (govulncheck, which
+# reports only what the code can reach) and the console's production npm
+# dependencies, at high or critical. On a pull request that changes code or
+# dependencies; weekly on main, for advisories published since.
+on:
+  pull_request:
+    paths:
+      - '**/*.go'
+      - go.mod
+      - go.sum
+      - web/package.json
+      - web/package-lock.json
+      - .github/workflows/vulns.yml
+  schedule:
+    - cron: '17 6 * * 1'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: vulns-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  go:
+    name: govulncheck
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+      - name: govulncheck
+        run: go run golang.org/x/vuln/cmd/govulncheck@v1.9.0 ./...
+
+  npm:
+    name: npm audit (console, production, high and up)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 26
+      # From the lockfile: nothing is installed.
+      - name: npm audit
+        working-directory: web
+        run: npm audit --omit=dev --audit-level=high

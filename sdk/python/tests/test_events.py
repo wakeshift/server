@@ -1,0 +1,920 @@
+"""Events against a fake core: defining, emitting and serving them, natively
+and bridged (the same cases as the Node SDK's events tests)."""
+
+from __future__ import annotations
+
+import copy
+import re
+from pathlib import Path
+from typing import Any
+
+import pytest
+from mcp.server.mcpserver import MCPServer
+from pydantic import BaseModel, Field
+
+from wakeshift import Identity, ToolCall, WakeshiftError
+from wakeshift import _spec as wspec
+from wakeshift._events import _default_text
+from wakeshift._spec import EXTENSION_KEY, chatgpt_desktop, chatgpt_desktop_chat, chatgpt_not_native, dialect_of, native_client
+from wakeshift._text import TEXT
+from wakeshift._toolcall import _speaks_events
+
+from .helpers import FakeCore, Logged, fake_wake, golden_file, initialize, served
+
+
+class ChatArgs(BaseModel):
+    channel: str
+    sender: str | None = Field(None, alias="from")
+
+
+class ChatMessage(BaseModel):
+    sender: str = Field(alias="from")
+    text: str
+
+
+class Turn(BaseModel):
+    hole: list[str]
+    to_call: int = Field(alias="toCall")
+
+
+def chat_event(wake: Any) -> Any:
+    return wake.define_event(
+        "chat.message",
+        description="A new message in a channel",
+        args=ChatArgs,
+        payload=ChatMessage,
+        text=lambda m, a: f"{m.sender}: {m.text}",
+        authorize=lambda s, a: a.channel != "secret",
+    )
+
+
+def turn_event(wake: Any) -> Any:
+    return wake.define_event(
+        "game.turn",
+        description="It's your move",
+        # A JSON Schema works as well as a model.
+        args={"type": "object", "properties": {"table": {"type": "string"}}, "required": ["table"]},
+        payload=Turn,
+        text=lambda t, a: f"Your move: {t.to_call} to call",
+        personal=True,
+    )
+
+
+def text_of(res: dict[str, Any]) -> str:
+    return res["result"]["content"][0]["text"]
+
+
+def test_define_event_makes_the_manifests_event_type() -> None:
+    wake, _ = fake_wake()
+    chat = chat_event(wake)
+    assert chat.manifest["topic"] == "ev/chat.message/{channel}"
+    assert chat.manifest["filter"] == {"from": "{from}"}
+    assert chat.manifest["arguments"]["type"] == "object"
+    assert "$schema" not in chat.manifest["arguments"]
+    assert chat.manifest["arguments"]["required"] == ["channel"]
+    assert "personal" not in chat.manifest
+    turn = turn_event(wake)
+    assert turn.manifest["topic"] == "ev/game.turn/{table}"
+    assert turn.manifest["personal"] is True
+    assert turn._definition()["delivery"] == ["webhook", "poll"]
+
+
+def test_a_filter_given_without_a_topic_gets_the_defaults_added_and_the_callers_stays_as_it_was() -> None:
+    wake, _ = fake_wake()
+
+    class RoomArgs(BaseModel):
+        channel: str
+        sender: str | None = Field(None, alias="from")
+
+    class RoomMessage(BaseModel):
+        sender: str = Field(alias="from")
+        room: str
+
+    flt = {"room": "{channel}"}
+    ev = wake.define_event(
+        "chat.room", description="A message in a room", args=RoomArgs, payload=RoomMessage, text=lambda m, a: m.sender, filter=flt
+    )
+    assert ev.manifest["filter"] == {"room": "{channel}", "from": "{from}"}
+    assert flt == {"room": "{channel}"}
+
+
+def test_a_filter_on_the_field_an_optional_argument_already_filters_is_refused_naming_the_field() -> None:
+    wake, _ = fake_wake()
+
+    class RoomArgs(BaseModel):
+        channel: str
+        sender: str | None = Field(None, alias="from")
+
+    class RoomMessage(BaseModel):
+        sender: str = Field(alias="from")
+        room: str
+
+    def text(m: Any, a: Any) -> str:
+        return str(m.sender)
+
+    for tmpl in ("{channel}", "{from}"):
+        with pytest.raises(ValueError, match="filter on from conflicts with optional argument from"):
+            wake.define_event(
+                "chat.room",
+                description="A message in a room",
+                args=RoomArgs,
+                payload=RoomMessage,
+                text=text,
+                filter={"from": tmpl},
+            )
+    # With a topic there's no default filter, so the same filter is the app's own.
+    own = wake.define_event(
+        "chat.room",
+        description="A message in a room",
+        args=RoomArgs,
+        payload=RoomMessage,
+        text=text,
+        topic="rooms/{channel}",
+        filter={"from": "{from}"},
+    )
+    assert own.manifest["filter"] == {"from": "{from}"}
+
+
+def test_define_event_refuses_what_wakeshift_would() -> None:
+    wake, _ = fake_wake()
+
+    class P(BaseModel):
+        x: str
+
+    class N(BaseModel):
+        n: float
+
+    class Y(BaseModel):
+        y: str | None = None
+
+    empty: dict[str, Any] = {"type": "object", "properties": {}}
+
+    def text(p: Any, a: Any) -> str:
+        return "x"
+
+    with pytest.raises(ValueError, match="lowercase dot-separated"):
+        wake.define_event("Chat", description="d", args=empty, payload=P, text=text)
+    with pytest.raises(ValueError, match="Wakeshift's"):
+        wake.define_event("wakeshift.message", description="d", args=empty, payload=P, text=text)
+    with pytest.raises(ValueError, match="description"):
+        wake.define_event("a.b", description="", args=empty, payload=P, text=text)
+    with pytest.raises(ValueError, match="routes occurrences"):
+        wake.define_event("a.c", description="d", args=N, payload=P, text=text)
+    with pytest.raises(ValueError, match="payload field"):
+        wake.define_event("a.d", description="d", args=Y, payload=P, text=text)
+    wake.define_event("a.e", description="d", args=empty, payload=P, text=text)
+    with pytest.raises(ValueError, match="twice"):
+        wake.define_event("a.e", description="d", args=empty, payload=P, text=text)
+
+
+async def test_emit_checks_the_payload_merges_the_manifest_first_and_sends_the_rendered_line() -> None:
+    core = FakeCore(default_ok=True)
+    core.on("POST", "/events/emit", lambda b: (200, {"matched": 2, "duplicate": False}))
+    wake, _ = fake_wake(core)
+    chat = chat_event(wake)
+    wake.attach(MCPServer("chat"))  # a process that serves tools sends the manifest
+    with pytest.raises(WakeshiftError) as e:
+        await chat.emit({"channel": "eng"}, {"from": "ada"})
+    assert e.value.code == "bad_arguments" and "payload for" in str(e.value)
+    with pytest.raises(WakeshiftError, match="isn't personal"):
+        await chat.emit({"channel": "eng"}, {"from": "ada", "text": "hi"}, to="u1")
+    out = await chat.emit({"channel": "eng"}, {"from": "ada", "text": "shipped"}, id="m1")
+    assert (out.matched, out.duplicate) == (2, False)
+    assert [f"{m} {p}" for m, p, _ in core.requests] == ["POST /manifest/merge", "POST /events/emit"]
+    assert core.requests[0][2]["events"][0]["name"] == "chat.message"
+    assert core.requests[1][2] == {
+        "name": "chat.message",
+        "arguments": {"channel": "eng"},
+        "payload": {"from": "ada", "text": "shipped"},
+        "text": "ada: shipped",
+        "id": "m1",
+    }
+    # Sent once: the next emit goes straight out.
+    await chat.emit({"channel": "eng"}, {"from": "bob", "text": "ok"})
+    assert len(core.bodies("/manifest/merge")) == 1
+
+
+async def test_app_calls_never_send_the_manifest_without_events_or_from_a_process_that_doesnt_serve_tools() -> None:
+    # 0.4.0 sent an empty list here, which cleared every one of the app's events.
+    bare = FakeCore(default_ok=True)
+    wake, _ = fake_wake(bare)
+    await wake._request_app("GET", "/manifest")  # pyright: ignore[reportPrivateUsage]
+    assert [f"{m} {p}" for m, p, _ in bare.requests] == ["GET /manifest"]
+    core = FakeCore(default_ok=True)
+    core.on("POST", "/events/status", lambda b: (200, {"subscriptions": 0, "connected": 0}))
+    wake, _ = fake_wake(core)
+    chat = chat_event(wake)
+    await wake._request_app("GET", "/manifest")  # pyright: ignore[reportPrivateUsage]
+    await chat.status({"channel": "eng"})
+    assert [f"{m} {p}" for m, p, _ in core.requests] == ["GET /manifest", "POST /events/status"]
+    # Serving, with no events (attach refuses with none): still nothing.
+    served_bare = FakeCore(default_ok=True)
+    wake, _ = fake_wake(served_bare)
+    wake._serving = True  # pyright: ignore[reportPrivateUsage]
+    await wake._request_app("GET", "/manifest")  # pyright: ignore[reportPrivateUsage]
+    assert [f"{m} {p}" for m, p, _ in served_bare.requests] == ["GET /manifest"]
+
+
+async def test_a_process_that_only_emits_never_sends_the_manifest() -> None:
+    core = FakeCore(default_ok=True)
+    core.on("POST", "/events/emit", lambda b: (200, {"matched": 0}))
+    wake, _ = fake_wake(core)
+    await chat_event(wake).emit({"channel": "eng"}, {"from": "ada", "text": "shipped"})
+    assert [f"{m} {p}" for m, p, _ in core.requests] == ["POST /events/emit"]
+
+
+async def test_a_personal_event_is_emitted_to_one_subscriber() -> None:
+    core = FakeCore(default_ok=True)
+    core.on("POST", "/events/emit", lambda b: (200, {"matched": 1}))
+    wake, _ = fake_wake(core)
+    turn = turn_event(wake)
+    with pytest.raises(WakeshiftError, match="personal: pass to="):
+        await turn.emit({"table": "juniper"}, {"hole": ["As", "Kd"], "toCall": 2})
+    await turn.emit({"table": "juniper"}, {"hole": ["As", "Kd"], "toCall": 2}, to="ada")
+    body = core.bodies("/events/emit")[-1]
+    assert body["to"] == "ada"
+    assert body["payload"] == {"hole": ["As", "Kd"], "toCall": 2}
+
+
+async def test_a_trimmed_text_says_text_trimmed_and_warns_once_per_event() -> None:
+    # Wakeshift trims a text over 1000 bytes rather than refusing it: the SDK
+    # sends the text as rendered, however long, and warns once per event.
+    warnings = Logged()
+    core = FakeCore(default_ok=True)
+    reply: dict[str, object] = {"matched": 1, "duplicate": False, "text_trimmed": True}
+    core.on("POST", "/events/emit", lambda b: (200, reply))
+    wake, _ = fake_wake(core)
+    chat, turn = chat_event(wake), turn_event(wake)
+    long = "x" * 5000
+    for _ in range(3):
+        out = await chat.emit({"channel": "eng"}, {"from": "ada", "text": long})
+        assert out.text_trimmed is True
+    assert core.bodies("/events/emit")[0]["text"].endswith(long)
+    trimmed = lambda: [m for m, c in zip(warnings, warnings.codes(), strict=True) if c == "text_trimmed"]  # noqa: E731
+    assert len(trimmed()) == 1 and re.search(r"chat\.message's text was over 1000 bytes", trimmed()[0])
+    assert (await turn.emit({"table": "juniper"}, {"hole": ["As"], "toCall": 2}, to="ada")).text_trimmed is True
+    assert len(trimmed()) == 2
+    del reply["text_trimmed"]
+    assert (await chat.emit({"channel": "eng"}, {"from": "ada", "text": "hi"})).text_trimmed is False
+    assert len(trimmed()) == 2
+    # A text over 1000 bytes is trimmed, which text_trimmed reports: no monitor_line_long as well.
+    assert warnings.codes().count("monitor_line_long") == 0
+
+
+def test_speaks_events_the_extension_or_chatgpt_not_the_older_key() -> None:
+    assert _speaks_events({"extensions": {EXTENSION_KEY: {}}}, "x")
+    assert not _speaks_events({"events": {}}, "x")
+    assert _speaks_events({}, "openai-mcp")
+    # A harness Wakeshift wakes itself isn't native, whatever it declares: its name (or User-Agent) wins.
+    assert not _speaks_events({"extensions": {EXTENSION_KEY: {}}}, "claude-code")
+    assert not _speaks_events({"extensions": {EXTENSION_KEY: {}}}, "", "claude-code/2.1.316 (sdk-cli)")
+    assert not _speaks_events({"extensions": {EXTENSION_KEY: {}}}, "Cursor")
+    assert not _speaks_events({}, "claude-code")
+
+
+async def test_bridged_clients_get_subscribe_events_every_client_gets_unsubscribe_and_list() -> None:
+    core = FakeCore(default_ok=True)
+    core.on(
+        "POST",
+        "/event-subscriptions",
+        lambda b: (
+            200,
+            {"event_subscription": {"id": "es1", "created": True}, "addition": {"text": "Start the Monitor tool now."}},
+        ),
+    )
+    core.on(
+        "POST",
+        "/event-subscriptions/list",
+        lambda b: (
+            200,
+            {
+                "subscriptions": [
+                    {
+                        "id": "es1",
+                        "event": "chat.message",
+                        "arguments": {"channel": "eng"},
+                        "destination": "conversation",
+                        "created_at": "2026-10-21T10:00:00Z",
+                    }
+                ]
+            },
+        ),
+    )
+    core.on("POST", "/event-subscriptions/end", lambda b: (200, {"ended": True}))
+    core.on(
+        "POST",
+        "/event-subscriptions/unsubscribe",
+        lambda b: (200, {"ended": True, "addition": {"text": "Keep passing session_key."}}),
+    )
+    wake, _ = fake_wake(core)
+    chat_event(wake)
+    turn_event(wake)
+    server = MCPServer("chat")
+    wake.attach(server, identify=lambda r: Identity(user="u1"))
+    async with served(server, stateless=False) as (_, rpc):
+        await initialize(rpc, "claude-code")
+        tools = {t["name"]: t for t in (await rpc("tools/list", {}))["result"]["tools"]}
+        assert sorted(tools) == ["list_subscriptions", "subscribe_events", "unsubscribe_events"]
+        sub = tools["subscribe_events"]
+        assert sub["description"].startswith(TEXT["subscribe_description"])
+        assert "chat.message(channel, from): A new message in a channel" in sub["description"]
+        assert "session_key" in sub["inputSchema"]["properties"]
+        assert tools["unsubscribe_events"]["description"] == TEXT["unsubscribe_description"]
+        assert tools["list_subscriptions"]["description"] == TEXT["list_description"]
+        # Each with every SDK's annotations (tool-annotations.json): only
+        # list_subscriptions only reads, and says so.
+        annotations = golden_file("tool-annotations.json")
+        for name, tool in tools.items():
+            assert tool["annotations"] == annotations[name], name
+        assert tools["list_subscriptions"]["annotations"]["readOnlyHint"] is True
+
+        r = await rpc(
+            "tools/call",
+            {
+                "name": "subscribe_events",
+                "arguments": {"event": "chat.message", "arguments": {"channel": "eng"}, "harness": "claude-code"},
+            },
+        )
+        assert text_of(r) == 'Subscribed to chat.message {"channel":"eng"}.\n\nStart the Monitor tool now.'
+        call = core.bodies("/event-subscriptions")[0]
+        assert call["name"] == "chat.message"
+        assert call["arguments"] == {"channel": "eng"}
+        assert call["call"]["user"] == "u1"
+        assert call["call"]["client"] == "claude-code"
+        assert call["call"]["tool"] == "subscribe_events"
+        assert call["call"]["harness"] == "claude-code"
+
+        # authorize refuses, bad arguments are explained, nothing reaches the core.
+        before = len(core.requests)
+        refused = await rpc(
+            "tools/call", {"name": "subscribe_events", "arguments": {"event": "chat.message", "arguments": {"channel": "secret"}}}
+        )
+        assert refused["result"]["isError"] is True
+        assert "may not subscribe" in text_of(refused)
+        bad = await rpc(
+            "tools/call", {"name": "subscribe_events", "arguments": {"event": "chat.message", "arguments": {"room": "eng"}}}
+        )
+        assert bad["result"]["isError"] is True
+        assert "arguments for chat.message" in text_of(bad)
+        assert len(core.requests) == before
+
+        listed = await rpc("tools/call", {"name": "list_subscriptions", "arguments": {}})
+        assert re.search(r'- es1: chat\.message \{"channel":"eng"\}, wakes a conversation, since 2026-10-21', text_of(listed))
+        assert "Stopped subscription es1" in text_of(
+            await rpc("tools/call", {"name": "unsubscribe_events", "arguments": {"id": "es1"}})
+        )
+        assert core.bodies("/event-subscriptions/end")[0] == {"user": "u1", "id": "es1"}
+        un = await rpc(
+            "tools/call", {"name": "unsubscribe_events", "arguments": {"event": "chat.message", "arguments": {"channel": "eng"}}}
+        )
+        # Wakeshift's addition (the session key stays the same) follows the reply.
+        assert text_of(un) == 'Stopped chat.message {"channel":"eng"}.\n\nKeep passing session_key.'
+
+
+class RunArgs(BaseModel):
+    repo: str
+    pr: int
+    branch: str | None = None
+
+
+class Run(BaseModel):
+    status: str
+    branch: str
+
+
+async def test_the_tools_echo_arguments_in_name_order() -> None:
+    # As the other SDKs echo them (as Wakeshift keeps them), whatever order
+    # the event defines them in.
+    core = FakeCore(default_ok=True)
+    core.on(
+        "POST", "/event-subscriptions", lambda b: (200, {"event_subscription": {"id": "es1", "created": False}, "addition": {}})
+    )
+    core.on("POST", "/event-subscriptions/unsubscribe", lambda b: (200, {"ended": True}))
+    wake, _ = fake_wake(core)
+    wake.define_event(
+        "ci.run", description="A CI run finished.", args=RunArgs, payload=Run, text=lambda r, a: r.status, public=True
+    )
+    server = MCPServer("ci")
+    wake.attach(server, identify=lambda r: Identity(user="u1"))
+    args = {"pr": 5, "repo": "web", "branch": "main"}
+    async with served(server, stateless=False) as (_, rpc):
+        await initialize(rpc, "claude-code")
+        r = await rpc("tools/call", {"name": "subscribe_events", "arguments": {"event": "ci.run", "arguments": args}})
+        assert text_of(r) == 'Already subscribed to ci.run {"branch":"main","pr":5,"repo":"web"}: renewed.'
+        un = await rpc("tools/call", {"name": "unsubscribe_events", "arguments": {"event": "ci.run", "arguments": args}})
+        assert text_of(un) == 'Stopped ci.run {"branch":"main","pr":5,"repo":"web"}.'
+
+
+async def test_a_client_declaring_only_the_older_events_key_is_offered_subscribe_events() -> None:
+    wake, _ = fake_wake()
+    chat_event(wake)
+    server = MCPServer("chat")
+    wake.attach(server, identify=lambda r: Identity(user="u1"))
+    async with served(server, stateless=False) as (_, rpc):
+        await initialize(rpc, "some-client", {"events": {}})
+        tools = sorted(t["name"] for t in (await rpc("tools/list", {}))["result"]["tools"])
+        assert tools == ["list_subscriptions", "subscribe_events", "unsubscribe_events"]
+
+
+async def test_a_personal_event_needs_a_known_subscriber() -> None:
+    wake, core = fake_wake()
+    turn_event(wake)
+    server = MCPServer("poker")
+    wake.attach(server, identify=lambda r: Identity())
+    async with served(server, stateless=False) as (_, rpc):
+        await initialize(rpc, "claude-code")
+        r = await rpc(
+            "tools/call", {"name": "subscribe_events", "arguments": {"event": "game.turn", "arguments": {"table": "juniper"}}}
+        )
+        assert r["result"]["isError"] is True and "personal" in text_of(r)
+        # With no user, list_subscriptions lists the calling conversation's (by its call).
+        listed = await rpc("tools/call", {"name": "list_subscriptions", "arguments": {}})
+        assert not listed["result"].get("isError")
+        assert [set(b) for b in core.bodies("/event-subscriptions/list")] == [{"call"}]
+
+
+async def test_a_client_that_speaks_mcp_events_subscribes_natively_and_isnt_offered_subscribe_events() -> None:
+    core = FakeCore(default_ok=True)
+    core.on(
+        "POST",
+        "/events/subscribe",
+        lambda b: (
+            200,
+            {"id": "sub_1", "refresh_before": "2026-10-22T10:00:00.000Z", "cursor": "c1", "truncated": False, "created": True},
+        ),
+    )
+    core.on("POST", "/events/unsubscribe", lambda b: (200, {"ended": False}))
+    wake, _ = fake_wake(core)
+    chat_event(wake)
+    server = MCPServer("chat")
+    wake.attach(server, identify=lambda r: Identity(user="u1"))
+    async with served(server, stateless=False) as (_, rpc):
+        init = await initialize(rpc, "openai-mcp")
+        caps = init["result"]["capabilities"]
+        assert caps["events"] == {"listChanged": False}
+        assert caps["extensions"][EXTENSION_KEY] == {"listChanged": False}
+        names = sorted(t["name"] for t in (await rpc("tools/list", {}))["result"]["tools"])
+        assert names == ["list_subscriptions", "unsubscribe_events"]
+
+        lst = (await rpc("events/list", {}))["result"]
+        assert lst["resultType"] == "complete"
+        assert lst["events"][0]["name"] == "chat.message"
+        assert lst["events"][0]["delivery"] == ["webhook", "poll"]
+
+        delivery = {"mode": "webhook", "url": "https://chatgpt.example/cb", "secret": "whsec_x"}
+        res = await rpc(
+            "events/subscribe", {"name": "chat.message", "arguments": {"channel": "eng"}, "delivery": delivery, "ttlMs": 3600000}
+        )
+        assert res["result"] == {
+            "resultType": "complete",
+            "id": "sub_1",
+            "refreshBefore": "2026-10-22T10:00:00Z",
+            "cursor": "c1",
+            "truncated": False,
+        }
+        body = core.bodies("/events/subscribe")[0]
+        assert body["dialect"] == "chatgpt"
+        assert body["call"]["user"] == "u1"
+        assert body["ttl_ms"] == 3600000
+        assert body["delivery"] == delivery
+
+        async def code(params: dict[str, Any], method: str = "events/subscribe") -> int:
+            out = await rpc(method, params)
+            assert "error" in out, out
+            return out["error"]["code"]
+
+        assert await code({"name": "chat.nope", "arguments": {}, "delivery": delivery}) == -32011, "ChatGPT's NotFound"
+        assert await code({"name": "chat.message", "arguments": {"channel": "secret"}, "delivery": delivery}) == -32012, (
+            "ChatGPT's Forbidden"
+        )
+        assert await code({"name": "chat.message", "arguments": {"room": "x"}, "delivery": delivery}) == -32602
+        assert await code({"name": "chat.message", "arguments": {"channel": "eng"}, "delivery": {"mode": "poll"}}) == -32602, (
+            "ChatGPT has no Unsupported"
+        )
+        # The Mcp-Name header must match params.name.
+        mismatch = await rpc(
+            "events/subscribe",
+            {"name": "chat.message", "arguments": {"channel": "eng"}, "delivery": delivery},
+            headers={"Mcp-Name": "other.event"},
+        )
+        assert mismatch["error"]["code"] == wspec.HEADER_MISMATCH
+        # Unsubscribing nothing: ChatGPT gets the empty result it always has.
+        un = await rpc("events/unsubscribe", {"name": "chat.message", "arguments": {"channel": "eng"}, "delivery": delivery})
+        assert un["result"] == {"resultType": "complete"}
+
+
+async def test_draft_clients_get_the_drafts_codes() -> None:
+    core = FakeCore(default_ok=True)
+    core.on(
+        "POST",
+        "/events/subscribe",
+        lambda b: (
+            400,
+            {"error": {"code": "callback_failed", "message": "the callback didn't echo the challenge", "reason": "challenge"}},
+        ),
+    )
+    core.on("POST", "/events/unsubscribe", lambda b: (200, {"ended": False}))
+    wake, _ = fake_wake(core)
+    chat_event(wake)
+    server = MCPServer("chat")
+    wake.attach(server, identify=lambda r: Identity(user="u1"))
+    async with served(server, stateless=False) as (_, rpc):
+        await initialize(rpc, "some-draft-client", capabilities={"extensions": {EXTENSION_KEY: {}}})
+        delivery = {"mode": "webhook", "url": "https://x.example/cb", "secret": "whsec_x"}
+        cb = (await rpc("events/subscribe", {"name": "chat.message", "arguments": {"channel": "eng"}, "delivery": delivery}))[
+            "error"
+        ]
+        assert cb["code"] == -32027
+        assert cb["data"] == {"reason": "challenge"}
+        assert (await rpc("events/unsubscribe", {"name": "chat.message", "arguments": {"channel": "eng"}, "delivery": delivery}))[
+            "error"
+        ]["code"] == -32023
+        assert (await rpc("events/stream", {"name": "chat.message"}))["error"]["code"] == -32026
+        assert (await rpc("events/poll", {"name": "no.such.event"}))["error"]["code"] == -32023  # no such event
+        # No params.name: InvalidParams, before push or the event (SEP-3415).
+        assert (await rpc("events/stream", {}))["error"]["code"] == -32602
+        assert (await rpc("events/poll", {}))["error"]["code"] == -32602
+        # A client that declared the extension isn't offered subscribe_events either.
+        names = sorted(t["name"] for t in (await rpc("tools/list", {}))["result"]["tools"])
+        assert names == ["list_subscriptions", "unsubscribe_events"]
+
+
+async def test_subscription_limit_is_resource_exhausted() -> None:
+    message = "this user already has 20 live webhook subscriptions to this app"
+    core = FakeCore(default_ok=True)
+    core.on("POST", "/events/subscribe", lambda b: (403, {"error": {"code": "subscription_limit", "message": message}}))
+    wake, _ = fake_wake(core)
+    chat_event(wake)
+    server = MCPServer("chat")
+    wake.attach(server, identify=lambda r: Identity(user="u1"))
+    async with served(server, stateless=False) as (_, rpc):
+        await initialize(rpc, "some-draft-client", capabilities={"extensions": {EXTENSION_KEY: {}}})
+        delivery = {"mode": "webhook", "url": "https://x.example/cb", "secret": "whsec_x"}
+        err = (await rpc("events/subscribe", {"name": "chat.message", "arguments": {"channel": "eng"}, "delivery": delivery}))[
+            "error"
+        ]
+        assert err["code"] == -32025
+        assert "20 live webhook subscriptions" in err["message"]
+        assert err["data"] == {"limit": "subscriptions"}
+
+
+def test_spec_constants_match_the_cores() -> None:
+    go_file = Path(__file__).resolve().parents[3] / "internal" / "mcpevents" / "event" / "spec.go"
+    if not go_file.exists():
+        pytest.skip("not in the Wakeshift repository")
+    go = go_file.read_text()
+
+    def s(name: str) -> str | None:
+        m = re.search(name + r'\s*=\s*"([^"]+)"', go)
+        return m.group(1) if m else None
+
+    assert wspec.REVISION == s("Revision")
+    assert wspec.EXTENSION_KEY == s("ExtensionKey")
+    assert wspec.TOP_LEVEL_KEY == s("TopLevelKey")
+    assert wspec.RESULT_TYPE == s("ResultType")
+    assert wspec.TEXT_META == s("TextMeta")
+    assert wspec.NAME_HEADER == (s("NameHeader") or "").lower()
+    draft = re.search(
+        r"return Codes\{NotFound: (-\d+), Forbidden: (-\d+), ResourceExhausted: (-\d+), Unsupported: (-\d+), CallbackEndpoint: (-\d+)\}",
+        go,
+    )
+    assert draft
+    d = wspec.codes_for("draft")
+    assert [d.not_found, d.forbidden, d.resource_exhausted, d.unsupported, d.callback_endpoint] == [
+        int(x) for x in draft.groups()
+    ]
+    chatgpt = re.search(
+        r"return Codes\{NotFound: (-\d+), Forbidden: (-\d+), ResourceExhausted: InvalidParams, Unsupported: InvalidParams, CallbackEndpoint: (-\d+)\}",
+        go,
+    )
+    assert chatgpt
+    c = wspec.codes_for("chatgpt")
+    assert [c.not_found, c.forbidden, c.callback_endpoint] == [int(x) for x in chatgpt.groups()]
+    assert c.unsupported == wspec.INVALID_PARAMS
+
+
+async def test_an_authorize_that_raises_refuses_on_both_paths_and_the_app_hears_why() -> None:
+    warnings = Logged()
+    core = FakeCore(default_ok=True)
+    wake, _ = fake_wake(core)
+
+    class Args(BaseModel):
+        channel: str
+
+    class Msg(BaseModel):
+        text: str
+
+    def authorize(s: Any, a: Any) -> bool:
+        raise RuntimeError("the ACL service is down")
+
+    wake.define_event(
+        "chat.message", description="A message", args=Args, payload=Msg, text=lambda m, a: m.text, authorize=authorize
+    )
+    server = MCPServer("chat")
+    wake.attach(server, identify=lambda r: Identity(user="u1"))
+    async with served(server, stateless=False) as (_, rpc):
+        await initialize(rpc, "claude-code")
+        r = await rpc(
+            "tools/call", {"name": "subscribe_events", "arguments": {"event": "chat.message", "arguments": {"channel": "eng"}}}
+        )
+        assert r["result"]["isError"] is True and "may not subscribe" in text_of(r)
+    async with served(server, stateless=False) as (_, rpc):
+        await initialize(rpc, "openai-mcp")
+        delivery = {"mode": "webhook", "url": "https://x.example/cb", "secret": "whsec_x"}
+        out = await rpc("events/subscribe", {"name": "chat.message", "arguments": {"channel": "eng"}, "delivery": delivery})
+        assert out["error"]["code"] == -32012
+    assert warnings.codes() == ["authorize_failed"], "rate-limited: one line for both"
+    assert re.search(r"authorize for chat\.message raised RuntimeError", warnings[0])
+    assert warnings.records[0].wakeshift_error_type == "RuntimeError"  # type: ignore[attr-defined]
+    assert "ACL service" not in warnings[0], "never the vendor's own message"
+    assert not [p for _, p, _ in core.requests if "subscribe" in p], "nothing reached the core"
+
+
+def test_attach_needs_events_and_an_mcpserver() -> None:
+    wake, _ = fake_wake()
+    logged = Logged()
+    wake.attach(MCPServer("x"))
+    assert logged.codes() == ["no_events"]
+    chat_event(wake)
+    with pytest.raises(TypeError, match="MCPServer"):
+        wake.attach(object())
+
+
+async def test_end_ends_one_of_a_users_subscriptions_by_id() -> None:
+    core = FakeCore(default_ok=True)
+    core.on("POST", "/event-subscriptions/end", lambda b: (200, {"ended": b["id"] == "es_1"}))
+    wake, _ = fake_wake(core)
+    turn = turn_event(wake)
+    assert await turn.end("u1", "es_1") is True
+    assert await turn.end("u1", "es_other") is False
+    assert core.bodies("/event-subscriptions/end") == [{"user": "u1", "id": "es_1"}, {"user": "u1", "id": "es_other"}]
+
+
+async def test_a_wrapped_leave_tool_ends_the_callers_own_subscription_with_those_arguments() -> None:
+    core = FakeCore(default_ok=True)
+    core.on("POST", "/event-subscriptions/unsubscribe", lambda b: (200, {"ended": b["arguments"] == {"table": "t1"}}))
+    wake, _ = fake_wake(core)
+    turn = turn_event(wake)
+    server = MCPServer("cards")
+    attached = wake.attach(server, identify=lambda r: Identity(user="u1"))
+    got: list[Any] = []
+
+    @attached.tool()
+    async def leave(table: str, call: ToolCall) -> str:
+        """Leave a table."""
+        try:
+            got.append(await call.unsubscribe(turn, {"table": table} if table else {}))
+        except WakeshiftError as err:
+            got.append(err)
+        return "Left."
+
+    async with served(server) as (_, rpc):
+        for args in ({"table": ""}, {"table": "t1", "session_key": "wsc_abc"}, {"table": "t2"}):
+            res = await rpc("tools/call", {"name": "leave", "arguments": args}, headers={"User-Agent": "claude-code/2.1.280"})
+            assert "result" in res and not res["result"].get("isError"), res
+    assert isinstance(got[0], WakeshiftError) and got[0].code == "bad_arguments" and "arguments for game.turn" in str(got[0])
+    assert got[1:] == [True, False]
+    reqs = core.bodies("/event-subscriptions/unsubscribe")
+    assert len(reqs) == 2
+    assert reqs[0]["name"] == "game.turn"
+    assert reqs[0]["arguments"] == {"table": "t1"}
+    assert (reqs[0]["call"]["user"], reqs[0]["call"]["session"], reqs[0]["call"]["tool"]) == ("u1", "wsc_abc", "leave")
+    assert "session" not in reqs[1]["call"]
+
+
+async def test_the_mcp_events_wire_format_is_every_sdks() -> None:
+    """mcp-events-wire.json (with the Go and Node SDKs): the wire format every
+    SDK serves a draft client, both sides of each events/subscribe and
+    events/poll."""
+    g = golden_file("mcp-events-wire.json")
+    assert g["revision"] == wspec.REVISION
+    assert g["delivery"] == list(wspec.DELIVERY)
+    for kind in ("subscribe", "poll"):
+        for c in g[kind]:
+            core = FakeCore(default_ok=True)
+            core.on("POST", f"/events/{kind}", lambda b, out=c["core_response"]: (200, out))
+            wake, _ = fake_wake(core)
+            chat_event(wake)
+            server = MCPServer("chat")
+            wake.attach(server, identify=lambda r: Identity(user="u1"))
+            async with served(server, stateless=False) as (_, rpc):
+                await initialize(rpc, "some-draft-client")
+                res = await rpc(f"events/{kind}", c["params"])
+            assert res.get("result") == c["result"], (kind, c["name"], res)
+            body = dict(core.bodies(f"/events/{kind}")[0])
+            assert body.pop("call")["user"] == "u1", (kind, c["name"])
+            body.pop("dialect", None)
+            assert body == c["core_request"], (kind, c["name"], body)
+
+
+async def test_publish_url_signing_secret() -> None:
+    # The secret goes to Wakeshift once; what comes back is its fingerprint.
+    core = FakeCore(default_ok=True)
+
+    def mint(b: Any) -> tuple[int, Any]:
+        out: dict[str, Any] = {"id": "pu1", "event": "chat.message", "url": "http://core.test/x"}
+        if b.get("signing_secret"):
+            out["signing"] = {"fingerprint": "abc123def456", "set_at": "2026-11-04T00:00:00Z"}
+        return 200, out
+
+    core.on("POST", "/events/publish-urls", mint)
+    wake, _ = fake_wake(core)
+    chat = chat_event(wake)
+    secret = "whsec_" + "A" * 43 + "="
+    url = await chat.create_publish_url({"channel": "eng"}, signing_secret=secret)
+    assert core.bodies("/events/publish-urls")[-1]["signing_secret"] == secret
+    assert url.signing is not None and url.signing.fingerprint == "abc123def456" and url.signing.set_at == "2026-11-04T00:00:00Z"
+    assert secret not in repr(url)
+    plain = await chat.create_publish_url({"channel": "eng"})
+    assert "signing_secret" not in core.bodies("/events/publish-urls")[-1] and plain.signing is None
+    sent = len(core.requests)
+    with pytest.raises(WakeshiftError) as e:
+        await chat.create_publish_url({"channel": "eng"}, signing_secret=" ")
+    assert e.value.code == "bad_signing_secret"
+    assert len(core.requests) == sent
+
+
+async def test_builtin_tools_output_schemas_and_structured_content() -> None:
+    # Every SDK's output schemas (tool-output-schemas.json), and matching
+    # structuredContent, with Wakeshift's text in its wakeshift field.
+    from wakeshift._text import OUTPUT_SCHEMAS
+
+    schemas = {k: v for k, v in golden_file("tool-output-schemas.json").items() if not k.startswith("_")}
+    assert OUTPUT_SCHEMAS == schemas
+    core = FakeCore(default_ok=True)
+    core.on(
+        "POST",
+        "/event-subscriptions",
+        lambda b: (
+            200,
+            {"event_subscription": {"id": "es1", "created": True}, "addition": {"text": "Start the Monitor tool now."}},
+        ),
+    )
+    core.on(
+        "POST",
+        "/event-subscriptions/list",
+        lambda b: (
+            200,
+            {
+                "subscriptions": [
+                    {
+                        "id": "es1",
+                        "event": "chat.message",
+                        "arguments": {"channel": "eng"},
+                        "destination": "conversation",
+                        "created_at": "2026-10-21T10:00:00.123456Z",
+                    }
+                ]
+            },
+        ),
+    )
+    core.on("POST", "/event-subscriptions/end", lambda b: (200, {"ended": False}))
+    core.on("POST", "/event-subscriptions/unsubscribe", lambda b: (200, {"ended": True}))
+    wake, _ = fake_wake(core)
+    chat_event(wake)
+    server = MCPServer("chat")
+    wake.attach(server, identify=lambda r: Identity(user="u1"))
+    async with served(server, stateless=False) as (_, rpc):
+        await initialize(rpc, "claude-code")
+        tools = {t["name"]: t for t in (await rpc("tools/list", {}))["result"]["tools"]}
+        for name, tool in tools.items():
+            assert tool["outputSchema"] == schemas[name], name
+        sub = await rpc(
+            "tools/call", {"name": "subscribe_events", "arguments": {"event": "chat.message", "arguments": {"channel": "eng"}}}
+        )
+        assert sub["result"]["structuredContent"] == {
+            "subscribed": {"event": "chat.message", "arguments": {"channel": "eng"}, "created": True},
+            "wakeshift": "Start the Monitor tool now.",
+        }
+        listed = await rpc("tools/call", {"name": "list_subscriptions", "arguments": {}})
+        assert listed["result"]["structuredContent"] == {
+            "subscriptions": [
+                {
+                    "id": "es1",
+                    "event": "chat.message",
+                    "arguments": {"channel": "eng"},
+                    "destination": "conversation",
+                    "since": "2026-10-21T10:00:00Z",
+                }
+            ]
+        }
+        by_id = await rpc("tools/call", {"name": "unsubscribe_events", "arguments": {"id": "es9"}})
+        assert by_id["result"]["structuredContent"] == {"ended": False}
+        unsub = await rpc(
+            "tools/call", {"name": "unsubscribe_events", "arguments": {"event": "chat.message", "arguments": {"channel": "eng"}}}
+        )
+        assert unsub["result"]["structuredContent"] == {"ended": True}
+        refused = await rpc(
+            "tools/call", {"name": "subscribe_events", "arguments": {"event": "chat.message", "arguments": {"channel": "secret"}}}
+        )
+        assert refused["result"]["isError"] is True and "structuredContent" not in refused["result"]
+
+
+async def test_a_fresh_process_mints_a_publish_url_and_reads_status() -> None:
+    """#62: before anything attached, Wakeshift may not know the event yet: on
+    unknown_event the SDK sends its manifest, merged, then asks once more."""
+    core = FakeCore(default_ok=True)
+    known: list[bool] = [False]
+
+    def merged(b: Any) -> tuple[int, Any]:
+        known[0] = True
+        return 200, b
+
+    def needs_event(out: Any) -> Any:
+        def answer(b: Any) -> tuple[int, Any]:
+            if not known[0]:
+                return 404, {"error": {"code": "unknown_event", "message": "no such event"}}
+            return 200, out
+
+        return answer
+
+    core.on("POST", "/manifest/merge", merged)
+    core.on("POST", "/events/publish-urls", needs_event({"id": "p1", "url": "https://app.wakeshift.ai/p/wsp_secret123456"}))
+    core.on("POST", "/events/status", needs_event({"subscriptions": 1, "connected": 1}))
+    wake, _ = fake_wake(core)
+    chat = chat_event(wake)
+    url = await chat.create_publish_url({"channel": "eng"})
+    assert url.id == "p1"
+    assert [p for _, p, _ in core.requests] == ["/events/publish-urls", "/manifest/merge", "/events/publish-urls"]
+    known[0] = False
+    core.requests.clear()
+    assert (await chat.status({"channel": "eng"})).subscriptions == 1
+    assert [p for _, p, _ in core.requests] == ["/events/status", "/manifest/merge", "/events/status"]
+
+
+@pytest.mark.parametrize("case", golden_file("default-text.json")["cases"], ids=lambda c: c["name"])
+def test_default_text_golden(case: dict[str, Any]) -> None:
+    """An event without text: the line the agent reads, as every SDK writes
+    it (default-text.json)."""
+    assert _default_text(case["description"], case["args"]) == case["want"]
+
+
+def test_bridged_clients_by_name_or_user_agent() -> None:
+    # Never native, whatever they declare (the client table's bridged entries).
+    declares = {"io.modelcontextprotocol/clientCapabilities": {"extensions": {EXTENSION_KEY: {}}}}
+    for client, ua in [
+        ("claude-code", ""),
+        ("", "claude-code/2.1.316 (sdk-cli)"),
+        ("Cursor", ""),
+        ("", "Cursor/1.0.0"),
+        ("capy", ""),
+        ("", "capy"),
+        ("muse-custom-connector", ""),
+        ("opencode", ""),
+    ]:
+        assert not native_client(client, ua, declares, None), (client, ua)
+    assert native_client("acme-agent", "acme/1", declares, None)
+
+
+def test_dialect_of_chatgpt_through_codex() -> None:
+    # Work chats send tools/call and events/* as "openai-mcp/1.0.0 (Codex)", events/list as "openai-mcp/1.0.0".
+    assert dialect_of("", "openai-mcp/1.0.0 (Codex)") == "chatgpt"
+    assert dialect_of("", "openai-mcp/1.0.0") == "chatgpt"
+    assert dialect_of("openai-mcp", "") == "chatgpt"
+    assert dialect_of("", "codex-mcp-client/0.166.0") == "spec"
+    assert dialect_of("acme", "", {"openai/session": "c1"}) == "chatgpt"
+
+
+DESKTOP_CAPS = {
+    "experimental": {"openai/visibility": {"enabled": True}},
+    "elicitation": {"form": {}, "url": {}},
+    "extensions": {
+        "io.modelcontextprotocol/ui": {"mimeTypes": ["text/html;profile=mcp-app", "text/html+skybridge"]},
+        "openai/elicitation": {"form": {}, "userVerification": {}},
+        "openai/form": {},
+    },
+}
+WEB_CAPS = {
+    "experimental": {"openai/visibility": {"enabled": True}},
+    "extensions": {
+        "io.modelcontextprotocol/ui": {"mimeTypes": ["text/html;profile=mcp-app"]},
+        "openai/elicitation": {"userVerification": {}},
+    },
+}
+
+
+def test_chatgpt_desktop_by_its_capabilities() -> None:
+    """ChatGPT's desktop app (Codex mode): its client name, with both the
+    skybridge mime type and openai/form (the probes of November 9-10, 2026);
+    a Work chat on the web, the desktop app's regular chat and anything less
+    are ChatGPT."""
+    caps = "io.modelcontextprotocol/clientCapabilities"
+    assert chatgpt_desktop("openai-mcp (Codex)", {caps: DESKTOP_CAPS})
+    assert not chatgpt_desktop("openai-mcp (Codex)", {caps: WEB_CAPS, "traceparent": "00-x"})
+    regular = {"extensions": {"io.modelcontextprotocol/ui": {"mimeTypes": ["text/html;profile=mcp-app"]}}}
+    desktop_chat = {caps: regular, "openai/userAgent": "Codex Desktop/26.1103.60933 (Mac OS; arm64)"}
+    assert not chatgpt_desktop("openai-mcp", desktop_chat)
+    assert chatgpt_desktop_chat("openai-mcp", desktop_chat) and chatgpt_not_native("openai-mcp", desktop_chat)
+    assert not chatgpt_desktop_chat("openai-mcp", {"openai/userAgent": "Mozilla/5.0"})
+    assert not chatgpt_desktop_chat("openai-mcp", {"openai/session": "x"}), "the web's chats send none"
+    assert not chatgpt_desktop_chat("openai-mcp (Codex)", desktop_chat), "Codex mode's name"
+    assert not chatgpt_not_native("openai-mcp (Codex)", {caps: WEB_CAPS})
+    no_form = copy.deepcopy(DESKTOP_CAPS)
+    del no_form["extensions"]["openai/form"]
+    no_skybridge = copy.deepcopy(DESKTOP_CAPS)
+    no_skybridge["extensions"]["io.modelcontextprotocol/ui"]["mimeTypes"] = ["text/html;profile=mcp-app"]
+    assert not chatgpt_desktop("openai-mcp (Codex)", {caps: no_form})
+    assert not chatgpt_desktop("openai-mcp (Codex)", {caps: no_skybridge})
+    assert not chatgpt_desktop("openai-mcp (Codex)", {}), "no capabilities to go by"
+    assert not chatgpt_desktop("openai-mcp (Codex)", {caps: "x"}), "malformed"
+    assert not chatgpt_desktop("openai-mcp", {caps: DESKTOP_CAPS})

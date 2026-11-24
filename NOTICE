@@ -1,0 +1,23 @@
+Wakeshift server
+Copyright 2026 Clawvisor Inc.
+
+This product is licensed under the Apache License, Version 2.0 (LICENSE).
+The Wakeshift name and logo are not licensed; see TRADEMARKS.md.
+
+The Codex desktop IPC client (internal/codexconnector/desktopipc.go) follows the
+client in OpenAI Codex (https://github.com/openai/codex,
+codex-rs/tui/src/ide_context/ipc.rs), licensed under the Apache License,
+Version 2.0.
+OpenAI Codex
+Copyright 2025 OpenAI
+
+The console and the agent picker show the logos of the agents Wakeshift wakes
+(web/src/components/AgentLogos.tsx, web/public/logos/hermes-agent.svg and
+apps/agentpicker/static/agent-logos.svg, which the agent picker's pages
+reference):
+Claude (Anthropic), OpenAI (Codex), Cursor, GitHub Copilot, opencode,
+Google Antigravity, pi, Hermes Agent (Nous Research) and Grok (xAI). They are
+trademarks of their owners, used only to name those products. They are not
+licensed under the Apache License, Version 2.0, or any other license, by this
+repository. Remove or replace them in your own distribution unless your use is
+covered by their owners' guidelines.

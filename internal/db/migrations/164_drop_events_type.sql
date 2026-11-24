@@ -1,0 +1,11 @@
+-- migrate:no-transaction
+-- events_type (tenant_id, type, seq), from 002_events.sql, is never used:
+-- production's pg_stat_user_indexes counted 0 scans of it in 24 days (Oct
+-- 21 to Nov 14, 2026), while every insert into events (7.2 million rows)
+-- maintained it, and it took 914 MB. The pipeline reads events by sequence
+-- number (the primary key) and filters types as it goes.
+--
+-- Dropped CONCURRENTLY: events is written by every publish. IF EXISTS
+-- makes it safe to run again. To bring it back, build it the same way:
+-- CREATE INDEX CONCURRENTLY events_type ON events (tenant_id, type, seq).
+DROP INDEX CONCURRENTLY IF EXISTS events_type;

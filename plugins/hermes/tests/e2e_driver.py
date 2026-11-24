@@ -1,0 +1,94 @@
+"""The plugin against a real Wakeshift (Wakeshift's own repository runs
+this): stdin's first line is {"issuer", "session", "result"} (an app's
+tool result as Hermes hands it to transform_tool_result, from "tool" if it
+says, else mcp__app__watch); prints {"result"} (what the model would see),
+then {"run": text} for each turn it starts, as Hermes would run it. Each
+later line ({"result", "tool"}) is another tool result in the same
+conversation, answered with {"result"}; {"session_key_for": tool[,
+"session"]} is answered with {"session_key"}, what the tool_request
+middleware would fill in for that tool. {"links": true} is answered with
+{"links": [the saved links' apps]}; {"restart": true} stops the plugin and
+starts it again on the same state, as a gateway restart does (resume), and
+is answered with {"resumed": n}. Stops when stdin closes."""
+import json
+import sys
+import tempfile
+import threading
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
+from wakeshift import plugin  # noqa: E402
+
+out_lock = threading.Lock()
+
+
+def say(v):
+    with out_lock:
+        sys.stdout.write(json.dumps(v) + "\n")
+        sys.stdout.flush()
+
+
+first = json.loads(sys.stdin.readline())
+sid = first["session"]
+p = None
+
+
+def run(session, text, batch):
+    say({"run": text, "session": session})
+
+    def turn():  # the run's turn, as Hermes reports it
+        p.turn_started(session_id=session, platform="api_server")
+        p.turn_ended(session_id=session)
+    threading.Thread(target=turn, daemon=True).start()
+    return True
+
+
+state = Path(tempfile.mkdtemp())
+
+
+def start():
+    return plugin.Wakeshift(state_dir=state, issuers=[first["issuer"]], wakers={"api_server": run},
+                            listener_args={"poll_wait": 1, "backoff_max": 1})
+
+
+p = start()
+calls = [0]
+
+
+def call(line):  # a turn with one tool call
+    calls[0] += 1
+    p.turn_started(session_id=sid, platform="api_server")
+    res = p.transform(tool_name=line.get("tool") or "mcp__app__watch", result=line["result"], session_id=sid, tool_call_id="call_%d" % calls[0])
+    p.turn_ended(session_id=sid)
+    say({"result": res})
+
+
+call(first)
+listener = next(iter(p.sessions[sid].listeners.values()), None)
+
+
+def report():  # once it's listening: how
+    while listener is not None and listener.state not in ("sse", "poll") and not listener.stopped:
+        listener._stop.wait(0.05)
+    say({"state": listener.state if listener else "none"})
+
+
+threading.Thread(target=report, daemon=True).start()
+for line in iter(sys.stdin.readline, ""):
+    if not line.strip():
+        continue
+    d = json.loads(line)
+    if d.get("links"):
+        say({"links": sorted(x.get("app", "") for x in p._stored())})
+        continue
+    if d.get("restart"):
+        p.stop()
+        p = start()
+        say({"resumed": p.resume(("api_server",))})
+        continue
+    if "session_key_for" in d:  # what the tool_request middleware would fill in for that tool
+        say({"session_key": p.session_key_for(d.get("session", sid), d["session_key_for"])})
+    else:
+        call(d)
+p.stop()

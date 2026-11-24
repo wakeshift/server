@@ -1,0 +1,41 @@
+{
+  "version": 1,
+  "hooks": {
+    "sessionStart": [
+      {
+        "type": "command",
+        "bash": "sh ./bin/wakeshift hook --harness copilot --event sessionStart",
+        "timeoutSec": 120
+      }
+    ],
+    "preMcpToolCall": [
+      {
+        "type": "command",
+        "bash": "sh ./bin/wakeshift hook --harness copilot --event preMcpToolCall",
+        "timeoutSec": 5
+      }
+    ],
+    "postToolUse": [
+      {
+        "type": "command",
+        "bash": "sh ./bin/wakeshift hook --harness copilot --event postToolUse",
+        "timeoutSec": 20
+      }
+    ],
+    "permissionRequest": [
+      {
+        "type": "command",
+        "matcher": "bash",
+        "bash": "sh ./bin/wakeshift --if-ready hook --harness copilot --event permissionRequest",
+        "timeoutSec": 5
+      }
+    ],
+    "agentStop": [
+      {
+        "type": "command",
+        "bash": "sh ./bin/wakeshift hook --harness copilot --event agentStop",
+        "timeoutSec": 15
+      }
+    ]
+  }
+}

@@ -1,0 +1,19 @@
+name: wakeshift
+# The build's version, stamped when the plugin is packed (plugins/hermes,
+# hermes.Manifest); "0.0.0+dev" only in Wakeshift's own repository.
+version: "0.0.0+dev"
+description: "Wakeshift's plugin for Hermes Agent: lets Wakeshift messages wake your Hermes conversations (API server, CLI, TUI and Hermes Desktop ones, and Telegram and Discord direct messages), framed as outside information, never as you. It starts no turn until you allow it (plugins.entries.wakeshift.allow_gateway_injection: true)."
+author: "Wakeshift"
+license: "Apache-2.0"
+homepage: "https://wakeshift.ai/docs/hermes"
+provides_hooks:
+  - transform_tool_result
+  - pre_llm_call
+  - on_session_end
+provides_middleware:
+  - tool_request
+config_schema:
+  issuers:
+    type: list
+    label: "Trusted Wakeshift servers"
+    description: "The Wakeshift servers whose messages may wake your chats, as https:// URLs. Leave it unset to trust only https://app.wakeshift.ai. Takes effect in new chats, or after a gateway restart."

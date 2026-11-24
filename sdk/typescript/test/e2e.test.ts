@@ -1,0 +1,1115 @@
+// End to end against a real core: run with scripts/e2e.sh in Wakeshift's
+// own repository, which starts one with a self-serve app and points WAKESHIFT_SDK_HARNESS at its URL and test key. Skipped
+// without it.
+import { test } from "node:test";
+import assert from "node:assert/strict";
+import { spawn } from "node:child_process";
+import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { MCP, McpServer, headerOf, rawRpc } from "./mcp.js";
+import { Client } from "./mcp.js";
+import { InMemoryTransport } from "./mcp.js";
+import type { CallToolResult } from "./mcp.js";
+import { z } from "zod";
+import { createServer } from "node:http";
+import type { AddressInfo } from "node:net";
+import { createHmac, randomBytes } from "node:crypto";
+import { StreamableHTTPServerTransport } from "./mcp.js";
+import { StreamableHTTPClientTransport } from "./mcp.js";
+import { createMcpHandler as createMcpHandlerV2, McpServer as McpServerV2 } from "@modelcontextprotocol/server";
+import { hasCode as isCode } from "../src/errors.js";
+import { Wakeshift, type AgentScope, type Manifest, type Subscription } from "../src/index.js";
+import { quiet, warningsInto } from "./logs.js";
+
+// Since November 2026 the Monitor's command reads the conversation's link
+// from a file the agent writes with its file tool (the result's link step),
+// never from the command: monitorCmd writes it as the agent would, in a
+// HOME of the tests' own, and the commands run with that HOME.
+const LINK_HOME = mkdtempSync(join(tmpdir(), "wakeshift-links-"));
+const LINK_STEP = /If you haven't written this conversation's link to the file ~\/\.wakeshift\/links\/([0-9a-f]{16}) yet, first write it .*? its whole content this one line: (\S+) \./g;
+function monitorCmd(said: string): RegExpMatchArray | null {
+  for (const [, key, link] of said.matchAll(LINK_STEP)) {
+    mkdirSync(join(LINK_HOME, ".wakeshift", "links"), { recursive: true });
+    writeFileSync(join(LINK_HOME, ".wakeshift", "links", key!), link + "\n");
+  }
+  return said.match(/with this command: (f=\$HOME\/\.wakeshift\/links\/[0-9a-f]{16}; [^\n]*?c=; p=\$PPID; .*?; done; fi) \./);
+}
+
+
+const harness = process.env.WAKESHIFT_SDK_HARNESS;
+
+type Made = Extract<Subscription, { state: "created" | "renewed" }>;
+
+interface Frame {
+  type: string;
+  delivery_id?: string;
+  event?: { subject: string; data?: any; attrs?: Record<string, string>; trust?: string; from?: { kind: string; id: string } };
+}
+
+// Inbox: frames as they arrive, read with next().
+class Inbox {
+  private frames: Frame[] = [];
+  private waiters: (() => void)[] = [];
+  push(f: Frame) {
+    this.frames.push(f);
+    this.waiters.splice(0).forEach((w) => w());
+  }
+  async next(ms = 5000): Promise<Frame> {
+    const deadline = Date.now() + ms;
+    while (this.frames.length === 0) {
+      const left = deadline - Date.now();
+      if (left <= 0) throw new Error("nothing arrived");
+      await new Promise<void>((resolve) => {
+        const t = setTimeout(resolve, left);
+        this.waiters.push(() => (clearTimeout(t), resolve()));
+      });
+    }
+    return this.frames.shift()!;
+  }
+  async expect(subject: string): Promise<Frame> {
+    const f = await this.next();
+    assert.equal(f.event?.subject, subject);
+    return f;
+  }
+  async expectNothing(ms = 700) {
+    await assert.rejects(this.next(ms), /nothing arrived/);
+  }
+}
+
+// readLines runs the command Claude Code's Monitor is given (the session's
+// wait in a loop) in sh, as Monitor runs it: one JSON line per event.
+async function readLines(cmd: string, signal: AbortSignal): Promise<Inbox> {
+  const inbox = new Inbox();
+  const sh = spawn("sh", ["-c", cmd], { detached: true, stdio: ["ignore", "pipe", "ignore"], env: { ...process.env, HOME: LINK_HOME } });
+  signal.addEventListener("abort", () => {
+    try {
+      process.kill(-sh.pid!, "SIGKILL"); // its curl too
+    } catch {}
+  });
+  let buf = "";
+  sh.stdout!.on("data", (chunk: Buffer) => {
+    buf += chunk.toString();
+    let i;
+    while ((i = buf.indexOf("\n")) >= 0) {
+      const line = buf.slice(0, i).trim();
+      buf = buf.slice(i + 1);
+      if (!line) continue;
+      // A compact line for Monitor: the event's fields at the top level.
+      const l = JSON.parse(line) as { type: string; delivery_id?: string; subject: string; data?: any; from: string };
+      if (l.type !== "event") continue;
+      const [kind, id] = l.from.split("/");
+      inbox.push({ type: l.type, delivery_id: l.delivery_id, event: { subject: l.subject, data: l.data, from: { kind, id } } });
+    }
+  });
+  return inbox;
+}
+
+// connectCodex does what the connector for Codex does with a beacon: redeem
+// its ticket for the thread's stream link, and hold it, acknowledging.
+async function connectCodex(beacon: string, thread: string): Promise<{ inbox: Inbox; close: () => void }> {
+  const claims = JSON.parse(Buffer.from(beacon.split(".")[1], "base64url").toString());
+  assert.equal(claims.thread, thread);
+  const resp = await fetch(claims.redeem, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ ticket: claims.ticket, thread }) });
+  const redeemed = (await resp.json()) as { url: string };
+  assert.equal(resp.status, 200, JSON.stringify(redeemed));
+  const inbox = new Inbox();
+  const sock = new WebSocket(redeemed.url);
+  await new Promise<void>((resolve, reject) => {
+    sock.onopen = () => resolve();
+    sock.onerror = () => reject(new Error("websocket"));
+  });
+  sock.onmessage = (m) => {
+    const f = JSON.parse(String(m.data)) as Frame;
+    if (f.type !== "event") return;
+    sock.send(JSON.stringify({ type: "ack", delivery_id: f.delivery_id }));
+    inbox.push(f);
+  };
+  return { inbox, close: () => sock.close() };
+}
+
+async function eventually<T>(what: string, fn: () => Promise<T | undefined>, ms = 5000): Promise<T> {
+  const deadline = Date.now() + ms;
+  for (;;) {
+    const v = await fn();
+    if (v !== undefined) return v;
+    if (Date.now() > deadline) throw new Error(`timed out waiting for ${what}`);
+    await new Promise((r) => setTimeout(r, 100));
+  }
+}
+
+const text = (r: CallToolResult) => r.content.map((c: any) => c.text ?? "").join("\n");
+
+// ciBuild is the CI bot's event: CI finished on a repo; an optional branch
+// filters on the payload's.
+function ciBuild(wake: Wakeshift) {
+  return wake.defineEvent("ci.build", {
+    description: "CI finished on a repo",
+    public: true,
+    args: z.object({ repo: z.string(), branch: z.string().optional() }),
+    payload: z.object({ branch: z.string(), text: z.string() }),
+    text: (b) => b.text,
+  });
+}
+
+// statelessApp serves a wrapped watch tool on a stateless server (a new
+// McpServer per request, as such apps run), returning the subscriptions it
+// made and a call that posts one tools/call with a User-Agent and _meta.
+async function statelessApp(t: { after(fn: () => void): void }, wake: Wakeshift, build: ReturnType<typeof ciBuild>) {
+  const subs: Made[] = [];
+  const http = createServer(async (req, res) => {
+    const server = new McpServer({ name: "ci-bot", version: "1.0" });
+    const attached = wake.attach(server);
+    attached.registerTool(
+      "watch",
+      { inputSchema: { repo: z.string() }, subscribes: [build] },
+      async ({ repo }, _ctx, call) => {
+        subs.push((await call.subscribe(build, { repo })) as Made);
+        return `Watching ${repo}.`;
+      }
+    );
+    const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined, enableJsonResponse: true });
+    res.on("close", () => void transport.close());
+    await server.connect(transport);
+    await transport.handleRequest(req, res);
+  });
+  await new Promise<void>((r) => http.listen(0, "127.0.0.1", r));
+  t.after(() => void http.close());
+  const url = `http://127.0.0.1:${(http.address() as AddressInfo).port}/mcp`;
+  const call = async (ua: string, args: Record<string, unknown>, meta?: Record<string, unknown>): Promise<{ sub: Made; text: string }> => {
+    const resp = await fetch(url, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Accept: "application/json, text/event-stream", "User-Agent": ua },
+      body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/call", params: { name: "watch", arguments: { repo: "stateless", ...args }, ...(meta ? { _meta: meta } : {}) } }),
+    });
+    const out = (await resp.json()) as { result?: CallToolResult };
+    assert.ok(out.result && !out.result.isError, JSON.stringify(out));
+    return { sub: subs.at(-1)!, text: text(out.result) };
+  };
+  return call;
+}
+
+// First in this file, while the harness's app has no manifest: an app that
+// serves through createMcpHandler (a server per request, so attach runs only
+// once a request comes in) emits at startup, before any agent has
+// connected. The emit's unknown_event sends the manifest (a merge), and the
+// emit goes again and succeeds.
+test("an emit at startup, before any request, against a real core", { skip: !harness && "set WAKESHIFT_SDK_HARNESS (make sdk-e2e)" }, async () => {
+  const { core, key } = JSON.parse(readFileSync(harness!, "utf8")) as { core: string; key: string };
+  const sent: string[] = [];
+  const recorded = (async (url: string | URL | Request, init?: RequestInit) => {
+    const resp = await fetch(url, init);
+    sent.push(`${init?.method ?? "GET"} ${String(url).replace(core + "/api/apps/v1", "")} ${resp.status}`);
+    return resp;
+  }) as typeof fetch;
+  const wake = new Wakeshift({ key, core, fetch: recorded });
+  const boot = wake.defineEvent("app.booted", {
+    description: "The app started.",
+    args: z.object({}),
+    payload: z.object({ version: z.string() }),
+    text: (p) => `Started ${p.version}`,
+  });
+  // As an app serves: attach runs in the factory, once per request; none
+  // comes in during this test.
+  createMcpHandlerV2(() => {
+    const server = new McpServerV2({ name: "ci-bot", version: "1.0" });
+    wake.attach(server as never);
+    return server;
+  });
+  const out = await boot.emit({}, { version: "1.2.3" });
+  assert.equal(out.matched, 0);
+  assert.deepEqual(sent, ["POST /events/emit 404", "POST /manifest/merge 200", "POST /events/emit 200"]);
+  // From now on Wakeshift knows the event: the next emit is one request.
+  await boot.emit({}, { version: "1.2.4" });
+  assert.equal(sent.length, 4);
+  assert.equal(sent[3], "POST /events/emit 200");
+});
+
+test("the SDK against a real core", { skip: !harness && "set WAKESHIFT_SDK_HARNESS (make sdk-e2e)" }, async (t) => {
+  const { core, key } = JSON.parse(readFileSync(harness!, "utf8")) as { core: string; key: string };
+  const wake = new Wakeshift({ key, core });
+  const build = ciBuild(wake);
+  const subs: Made[] = [];
+  const refusals: unknown[] = [];
+
+  // The app's MCP server, as a developer writes it: one per connection,
+  // knowing its user (here, fixed per connection), its tools wrapped.
+  const appServer = (user?: string) => {
+    const server = new McpServer({ name: "ci-bot", version: "1.0" });
+    const attached = wake.attach(server, { identify: () => (user ? { user } : undefined) });
+    attached.registerTool(
+      "watch_ci",
+      { description: "Watch CI on a repo", inputSchema: { repo: z.string(), branch: z.string().optional() }, subscribes: [build] },
+      async ({ repo, branch }, _ctx, call) => {
+        try {
+          subs.push((await call.subscribe(build, branch ? { repo, branch } : { repo }, { reason: `Watching CI on ${repo}` })) as Made);
+        } catch (err) {
+          refusals.push(err);
+          return { isError: true, content: [{ type: "text" as const, text: "Couldn't watch." }] };
+        }
+        return `Watching CI on ${repo}.`;
+      }
+    );
+    attached.registerTool(
+      "unwatch_ci",
+      { inputSchema: { repo: z.string(), branch: z.string().optional() }, subscribes: [] },
+      async ({ repo, branch }, _ctx, call) => `Stopped watching ${repo} (${await call.unsubscribe(build, branch ? { repo, branch } : { repo })}).`
+    );
+    // A tool that subscribes to nothing: the wrapper adds nothing to its
+    // result.
+    attached.registerTool(
+      "list_jobs",
+      { inputSchema: { repo: z.string() }, subscribes: [] },
+      async ({ repo }) => ({ content: [{ type: "text" as const, text: `No builds on ${repo} today.` }] })
+    );
+    return server;
+  };
+  const clients: Client[] = [];
+  const connect = async (clientName: string, user?: string) => {
+    const [a, b] = InMemoryTransport.createLinkedPair();
+    const client = new Client({ name: clientName, version: "1.0" });
+    await Promise.all([appServer(user).connect(a), client.connect(b)]);
+    clients.push(client);
+    return client;
+  };
+  const stop = new AbortController();
+  const closers: (() => void)[] = [];
+  t.after(async () => {
+    stop.abort();
+    closers.forEach((c) => c());
+    await Promise.all(clients.map((c) => c.close()));
+  });
+  const status = async (user: string, sub: Made) => (await build.statusOf([{ user, subscription: sub.id }]))[0];
+
+  // Claude Code: the reply says to start Monitor on the session's wait, in a loop.
+  const claude = await connect("claude-code", "bob");
+  const watchedClaude = (await claude.callTool({ name: "watch_ci", arguments: { repo: "alpha" } })) as CallToolResult;
+  const claudeSub = subs.at(-1)!;
+  assert.equal(claudeSub.state, "created");
+  assert.equal(claudeSub.user, "bob");
+  assert.equal(claudeSub.recognized.harness, "claude-code");
+  assert.match(claudeSub.session, /^wsc_[a-z2-7]{26}$/);
+  const said = text(watchedClaude);
+  assert.ok(said.startsWith("Watching CI on alpha.\n\n"), said);
+  assert.ok(said.includes(`session_key="${claudeSub.session}"`), said);
+  const monitor = monitorCmd(said);
+  assert.ok(monitor, said);
+  const claudeLines = await readLines(monitor[1], stop.signal);
+  // Once its Monitor is running, subscribing again says so, and renews the
+  // same subscription.
+  const again = await eventually("Claude Code's Monitor", async () => {
+    const r = (await claude.callTool({ name: "watch_ci", arguments: { repo: "alpha", session_key: claudeSub.session } })) as CallToolResult;
+    return text(r).includes("already running") ? subs.at(-1)! : undefined;
+  });
+  assert.equal(again.id, claudeSub.id);
+  assert.equal(again.state, "renewed");
+  assert.equal((await build.emit({ repo: "alpha" }, { branch: "main", text: "hello claude" })).matched, 1);
+  await claudeLines.expect("hello claude");
+
+  // Codex: a thread in _meta; the reply carries a connector beacon.
+  const thread = "019a14bd-bbbc-7b70-a723-0abb9f38118e";
+  const codexMeta = { "x-codex-turn-metadata": { thread_id: thread } };
+  const codex = await connect("codex-mcp-client", "ada");
+  const watchedCodex = (await codex.callTool({ name: "watch_ci", arguments: { repo: "alpha", branch: "main" }, _meta: codexMeta })) as CallToolResult;
+  const codexSub = subs.at(-1)!;
+  assert.match(codexSub.session, /^wsc_[a-z2-7]{26}$/);
+  assert.equal(codexSub.recognized.harness, "codex");
+  assert.match(text(watchedCodex), /"Wakeshift: connected"/);
+  const beacon = watchedCodex._meta?.["wakeshift/connector"];
+  assert.equal(typeof beacon, "string");
+  // Before its connector runs, the subscription is live but not connected,
+  // and an occurrence waits.
+  assert.deepEqual(await status("ada", codexSub), { id: codexSub.id, user: "ada", live: true, connected: false });
+  assert.equal((await build.emit({ repo: "alpha" }, { branch: "main", text: "hello codex" })).matched, 2);
+  await claudeLines.expect("hello codex");
+  const codexStream = await connectCodex(beacon as string, thread);
+  closers.push(codexStream.close);
+  await codexStream.inbox.expect("hello codex");
+
+  // An emit reaches both, as outside information from the app; the same id
+  // again is one emit.
+  const run = { branch: "main", text: "CI failure on main: tests" };
+  const first = await build.emit({ repo: "alpha" }, run, { id: "gh-delivery-1" });
+  assert.equal(first.matched, 2);
+  assert.equal(first.duplicate, false);
+  assert.equal((await build.emit({ repo: "alpha" }, run, { id: "gh-delivery-1" })).duplicate, true);
+  await claudeLines.expect("CI failure on main: tests");
+  const codexGot = await codexStream.inbox.expect("CI failure on main: tests");
+  assert.equal(codexGot.event?.trust, "external");
+  assert.deepEqual(codexGot.event?.from, { kind: "app", id: wake.appId });
+  // The branch filter: Codex only hears about main.
+  assert.equal((await build.emit({ repo: "alpha" }, { branch: "dev", text: "CI passed on dev" })).matched, 1);
+  await claudeLines.expect("CI passed on dev");
+  await codexStream.inbox.expectNothing();
+
+  // Status: who's subscribed and how they're connected (read-only).
+  assert.deepEqual(await build.status({ repo: "alpha" }), { subscriptions: 2, connected: 2, via: { stream: 0, poll: 1, hooks: 1, webhook: 0 } });
+  assert.equal((await status("ada", codexSub)).via, "hooks");
+  assert.equal((await status("bob", claudeSub)).via, "poll");
+  assert.equal((await build.status({ repo: "nothing" })).subscriptions, 0);
+
+  // A publish URL: a webhook's JSON body is the payload; gone once revoked.
+  const post = (url: string, body: unknown) => fetch(url, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
+  const pu = await build.createPublishUrl({ repo: "alpha" });
+  assert.equal(pu.event, "ci.build");
+  assert.ok(pu.url.startsWith(core + "/v1/publish/"), pu.url);
+  const hook = await post(pu.url, { branch: "main", text: "from a webhook" });
+  assert.equal(hook.status, 202);
+  assert.equal(((await hook.json()) as any).matched, 2);
+  // The agent reads the event's default text (text doesn't run) and the body as data.
+  const viaHook = await claudeLines.expect("CI finished on a repo (repo alpha)");
+  assert.equal(viaHook.event?.data?.text, "from a webhook");
+  await codexStream.inbox.expect("CI finished on a repo (repo alpha)");
+  await wake.revokePublishUrl(pu.id);
+  assert.equal((await post(pu.url, { branch: "main", text: "x" })).status, 410);
+
+  // A harness with no wake path (a Cursor variant, no user): one neutral
+  // line and the session key. Nothing asks the agent to call a tool again,
+  // and what arrives waits for a listener: no later result hands it over.
+  const cursor = await connect("cursor-nightly");
+  const watchedCursor = (await cursor.callTool({ name: "watch_ci", arguments: { repo: "alpha" } })) as CallToolResult;
+  const cursorSub = subs.at(-1)!;
+  assert.match(cursorSub.session, /^wsc_/);
+  assert.match(text(watchedCursor), /Wakeshift can't wake this agent, so nothing will notify you here when something arrives\./);
+  assert.ok(text(watchedCursor).includes(`Pass session_key="${cursorSub.session}" to this app's tools from now on`), text(watchedCursor));
+  assert.doesNotMatch(text(watchedCursor), /again/);
+  assert.equal((await build.emit({ repo: "alpha" }, { branch: "dev", text: "held for cursor" })).matched, 2);
+  await claudeLines.expect("held for cursor");
+  // The next result of the app's tools is the app's alone.
+  const plain = (await cursor.callTool({ name: "list_jobs", arguments: { repo: "alpha", session_key: cursorSub.session } })) as CallToolResult;
+  assert.equal(plain.content.length, 1);
+  assert.equal((plain.content[0] as any).text, "No builds on alpha today.");
+
+  // A stateless server has no client name: the core tells the harness from
+  // the call's _meta, else its User-Agent, and says what it recognized.
+  const stateless = await statelessApp(t, wake, build);
+  const byMeta = await stateless("node", {}, { "claudecode/toolUseId": "toolu_e2e" });
+  assert.deepEqual(byMeta.sub.recognized, { harness: "claude-code", via: "meta", claimed: null });
+  assert.match(byMeta.text, /start the Monitor tool/);
+  const byUA = await stateless("opencode/1.18.7", {});
+  assert.deepEqual(byUA.sub.recognized, { harness: "opencode", via: "user_agent", claimed: null });
+  assert.match(byUA.text, /install\/opencode\.sh/);
+  const unknown = await stateless("node", {});
+  assert.deepEqual(unknown.sub.recognized, { harness: null, via: null, claimed: null });
+  // The agent's claim: it refines Cursor's calls into Grok Bot's, and is
+  // ignored where it contradicts the client name (here in _meta).
+  const asCursor = { "io.modelcontextprotocol/clientInfo": { name: "Cursor", version: "1.0" } };
+  const grok = await stateless("node", { harness: "Grok Bot", conversation_id: "bc-e2e-grok" }, asCursor);
+  assert.deepEqual(grok.sub.recognized, { harness: "grok-bot", via: "client", claimed: "grok-bot" });
+  assert.match(grok.text, /in the foreground/);
+  const spoof = await stateless("node", { harness: "claude-code" }, asCursor);
+  assert.deepEqual(spoof.sub.recognized, { harness: "cursor", via: "client", claimed: "claude-code" });
+  assert.doesNotMatch(spoof.text, /Monitor/);
+
+  // Errors carry the API's code.
+  // Another client of the same (here, no) user passing Cursor's session key.
+  const otherClient = await connect("claude-code");
+  const refused = (await otherClient.callTool({ name: "watch_ci", arguments: { repo: "alpha", session_key: cursorSub.session } })) as CallToolResult;
+  assert.equal(refused.isError, true);
+  assert.ok(isCode(refusals.at(-1), "other_client"), String(refusals.at(-1)));
+  await assert.rejects(build.emit({ repo: "Not A Segment" }, { branch: "main", text: "x" }), (e: unknown) => isCode(e, "bad_arguments"));
+  // A handle Wakeshift doesn't know: a new conversation, and it says so.
+  const stale = (await cursor.callTool({ name: "watch_ci", arguments: { repo: "stale", session_key: "wsc_AAAAAAAAAAAAAAAAAAAAAA" } })) as CallToolResult;
+  assert.notEqual(subs.at(-1)!.session, "wsc_AAAAAAAAAAAAAAAAAAAAAA");
+  assert.match(text(stale), /session_key you passed isn't known/);
+
+  // Unsubscribing without the session key (Claude Code's calls name no
+  // conversation): nothing ends, and the block says to call again with it.
+  const keyless = (await claude.callTool({ name: "unwatch_ci", arguments: { repo: "alpha" } })) as CallToolResult;
+  assert.match(text(keyless), /^Stopped watching alpha \(false\)\./);
+  assert.match(text(keyless), /nothing was unsubscribed, and this conversation may still be subscribed/);
+  assert.ok(!text(keyless).includes(claudeSub.session));
+  assert.equal((await status("bob", claudeSub)).live, true);
+
+  // Ending one subscription by its ID, outside a tool.
+  await claude.callTool({ name: "watch_ci", arguments: { repo: "beta", session_key: claudeSub.session } });
+  const bobBeta = subs.at(-1)!;
+  assert.equal(await build.end("bob", bobBeta.id), true);
+  assert.equal(await build.end("bob", bobBeta.id), false);
+  assert.equal((await status("bob", bobBeta)).live, false);
+
+  // Unsubscribe from a tool: the subscription ends.
+  const unwatched = (await codex.callTool({ name: "unwatch_ci", arguments: { repo: "alpha", branch: "main" }, _meta: codexMeta })) as CallToolResult;
+  assert.match(text(unwatched), /^Stopped watching alpha \(true\)\./);
+  assert.equal((await status("ada", codexSub)).live, false);
+
+  // forgetUser.
+  assert.equal(await wake.forgetUser("bob"), true);
+  assert.equal(await wake.forgetUser("bob"), false);
+  assert.equal(await wake.forgetUser("nobody"), false);
+  assert.equal((await status("bob", claudeSub)).live, false);
+  // The tests after this one start from no users.
+  await wake.forgetUser("ada");
+});
+
+// The same app's key in the current format (wst_ and 50 characters): it
+// names no app, so app() asks the core, and calls work as with the old one.
+test("a current-format key against a real core", { skip: !harness && "set WAKESHIFT_SDK_HARNESS (make sdk-e2e)" }, async (t) => {
+  const { core, key, new_key } = JSON.parse(readFileSync(harness!, "utf8")) as { core: string; key: string; new_key: string };
+  assert.ok(new_key, "the harness has no new_key");
+  const wake = new Wakeshift({ key: new_key, core, logger: quiet });
+  assert.equal(wake.appId, undefined);
+  const app = await wake.app();
+  assert.equal(app.id, "ci-bot");
+  assert.equal(typeof app.name, "string");
+  assert.equal(wake.appId, "ci-bot");
+
+  const build = ciBuild(wake);
+  const watch = await statelessApp(t, wake, build);
+  const { sub } = await watch("claude-code/2.1.280", { repo: "newkey" });
+  assert.equal(sub.state, "created");
+  assert.equal((await build.emit({ repo: "newkey" }, { branch: "main", text: "from a current key" })).matched, 1);
+  // The old key is the same app: it sees the subscription.
+  const old = new Wakeshift({ key, core, logger: quiet });
+  assert.equal((await ciBuild(old).status({ repo: "newkey" })).subscriptions, 1);
+  assert.equal((await old.app()).id, "ci-bot");
+});
+
+// Users' workspaces against a real core: the app signs its own users in
+// (here, a bearer token per user), its wrapped tool's calls carry the user,
+// Wakeshift keeps the user's conversation in the workspace it keeps for
+// them, and an agent added there has a grant until the user is forgotten.
+test("users' workspaces against a real core", { skip: !harness && "set WAKESHIFT_SDK_HARNESS (make sdk-e2e)" }, async (t) => {
+  const { core, key } = JSON.parse(readFileSync(harness!, "utf8")) as { core: string; key: string };
+  const wake = new Wakeshift({ key, core });
+  const build = ciBuild(wake);
+  const users: Record<string, string> = { "Bearer ada-token": "ada" };
+  const http = createServer(async (req, res) => {
+    // The app's own sign-in.
+    const user = users[req.headers.authorization ?? ""];
+    if (!user) {
+      res.writeHead(401).end();
+      return;
+    }
+    // Stateless: a server per request.
+    const server = new McpServer({ name: "ci-bot", version: "1.0" });
+    const attached = wake.attach(server, { identify: () => ({ user }) });
+    attached.registerTool(
+      "watch",
+      { inputSchema: { repo: z.string() }, subscribes: [build] },
+      async ({ repo }, _ctx, call) => {
+        await call.subscribe(build, { repo });
+        return `Watching ${repo} for ${call.user}.`;
+      }
+    );
+    const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined });
+    await server.connect(transport);
+    await transport.handleRequest(req, res);
+  });
+  await new Promise<void>((r) => http.listen(0, "127.0.0.1", r));
+  t.after(() => http.close());
+  const base = `http://127.0.0.1:${(http.address() as AddressInfo).port}`;
+
+  // The user's tool call subscribes in the user's workspace.
+  const workspace = await wake.workspace({ user: "ada", name: "Ada" });
+  const client = new Client({ name: "claude-code", version: "1.0" });
+  await client.connect(new StreamableHTTPClientTransport(new URL(base + "/mcp"), { requestInit: { headers: { Authorization: "Bearer ada-token" } } }));
+  t.after(() => client.close());
+  const res = (await client.callTool({ name: "watch", arguments: { repo: "users-acme" } })) as CallToolResult;
+  assert.match(text(res), /Watching users-acme for ada\./);
+  assert.equal(await wake.workspace({ user: "ada", name: "x" }), workspace, "the subscription used another workspace");
+  assert.equal((await build.status({ repo: "users-acme" })).subscriptions, 1);
+
+  // With an agent scope in the manifest, an agent in the user's workspace
+  // has a grant, live until the user is forgotten.
+  const scope = [{ pattern: "app.ci-bot.ci.*", description: "CI runs it watches" }];
+  // Wakeshift refuses a manifest that asks for Wakeshift accounts or redirect_uris: apps sign their own users in.
+  await assert.rejects(wake.publishManifest({ accounts: "wakeshift" } as Manifest), (e: any) => isCode(e, "bad_manifest"));
+  await assert.rejects(wake.publishManifest({ agent: { wake: scope, post: scope, ttlDays: 30, redirect_uris: [base + "/cb"] } as unknown as AgentScope }), (e: any) => isCode(e, "bad_manifest"));
+  const m = await wake.publishManifest({ agent: { wake: scope, post: scope, ttlDays: 30 } });
+  assert.equal(m.agent?.ttlDays, 30);
+  assert.ok(await wake.addAgent({ workspace, agent: "codex", displayName: "Codex" }));
+  await wake.checkAgent(workspace, "codex"); // the grant is live
+
+  // Forgetting the user ends their subscriptions and leaves no workspace behind.
+  assert.equal(await wake.forgetUser("ada"), true);
+  assert.equal((await build.status({ repo: "users-acme" })).subscriptions, 0);
+  await assert.rejects(wake.checkAgent(workspace, "codex"), (e: any) => isCode(e, "unknown_workspace"));
+  assert.equal(await wake.forgetUser("ada"), false);
+});
+
+// receiver is a callback that speaks MCP Events webhooks as a client would:
+// it checks the Standard Webhooks signature with its secret, echoes the
+// verification challenge, and keeps each occurrence.
+async function receiver() {
+  const secret = randomBytes(32);
+  const got: { name: string; data: any; meta: any; sub: string }[] = [];
+  const srv = createServer((req, res) => {
+    let raw = "";
+    req.on("data", (c) => (raw += c));
+    req.on("end", () => {
+      const id = String(req.headers["webhook-id"] ?? "");
+      const ts = String(req.headers["webhook-timestamp"] ?? "");
+      const want = "v1," + createHmac("sha256", secret).update(`${id}.${ts}.${raw}`).digest("base64");
+      if (!String(req.headers["webhook-signature"] ?? "").split(" ").includes(want)) {
+        res.writeHead(401).end();
+        return;
+      }
+      const body = JSON.parse(raw);
+      if (body.type === "verification") {
+        res.writeHead(200, { "Content-Type": "application/json" }).end(JSON.stringify({ challenge: body.challenge }));
+        return;
+      }
+      if (!body.type) got.push({ name: body.name, data: body.data, meta: body._meta, sub: String(req.headers["x-mcp-subscription-id"] ?? "") });
+      res.writeHead(202).end();
+    });
+  });
+  await new Promise<void>((r) => srv.listen(0, "127.0.0.1", r));
+  const url = `http://127.0.0.1:${(srv.address() as AddressInfo).port}/cb`;
+  return { url, secret: "whsec_" + secret.toString("base64"), got, close: () => srv.close() };
+}
+
+test("events against a real core: defined, served, emitted, bridged and native", { skip: !harness && "set WAKESHIFT_SDK_HARNESS (make sdk-e2e)" }, async (t) => {
+  const { core, key } = JSON.parse(readFileSync(harness!, "utf8")) as { core: string; key: string };
+  const wake = new Wakeshift({ key, core });
+  const build = wake.defineEvent("ci.build", {
+    description: "A CI run on a repo finished",
+    args: z.object({ repo: z.string() }),
+    payload: z.object({ conclusion: z.string(), url: z.string() }),
+    text: (b, a) => `CI ${b.conclusion} on ${a.repo}`,
+    authorize: (_s, a) => a.repo !== "secret",
+  });
+  const turn = wake.defineEvent("game.turn", {
+    description: "It's your move at a table",
+    args: z.object({ table: z.string() }),
+    payload: z.object({ hole: z.array(z.string()), toCall: z.number() }),
+    text: (p) => `Your move: ${p.hole.join(" ")}, ${p.toCall} to call`,
+    personal: true,
+  });
+  // One MCP server per connection, as a developer writes it, knowing its user.
+  const clients: Client[] = [];
+  const connect = async (clientName: string, user: string) => {
+    const server = new McpServer({ name: "ci-bot", version: "1.0" });
+    wake.attach(server, { identify: () => ({ user }) });
+    const [a, b] = InMemoryTransport.createLinkedPair();
+    const client = new Client({ name: clientName, version: "1.0" });
+    await Promise.all([server.connect(a), client.connect(b)]);
+    clients.push(client);
+    return client;
+  };
+  const stop = new AbortController();
+  const hooks: { close(): void }[] = [];
+  t.after(async () => {
+    stop.abort();
+    hooks.forEach((h) => h.close());
+    await Promise.all(clients.map((c) => c.close()));
+  });
+  const monitorOf = (r: CallToolResult) => {
+    const m = monitorCmd(text(r));
+    assert.ok(m, text(r));
+    return m[1];
+  };
+  const call = async (c: Client, name: string, args: Record<string, unknown>) => (await c.callTool({ name, arguments: args })) as CallToolResult;
+
+  // Bridged (Claude Code): subscribe_events, then a wake through the Monitor.
+  const claude = await connect("claude-code", "bob");
+  const sub = await call(claude, "subscribe_events", { event: "ci.build", arguments: { repo: "acme" } });
+  assert.match(text(sub), /^Subscribed to ci\.build \{"repo":"acme"\}\./);
+  const bobLines = await readLines(monitorOf(sub), stop.signal);
+  const refused = await call(claude, "subscribe_events", { event: "ci.build", arguments: { repo: "secret" } });
+  assert.equal(refused.isError, true);
+  assert.equal((await build.emit({ repo: "acme" }, { conclusion: "failure", url: "https://ci.example/1" })).matched, 1);
+  const got = await bobLines.expect("CI failure on acme");
+  assert.equal(got.event?.data?.url, "https://ci.example/1");
+  assert.deepEqual(got.event?.from, { kind: "app", id: wake.appId });
+
+  // Personal: two players at one table; each turn reaches only its player.
+  const p1 = await connect("claude-code", "p1");
+  const p2 = await connect("claude-code", "p2");
+  const p1Lines = await readLines(monitorOf(await call(p1, "subscribe_events", { event: "game.turn", arguments: { table: "t1" } })), stop.signal);
+  const p2Sub = await call(p2, "subscribe_events", { event: "game.turn", arguments: { table: "t1" } });
+  const p2Lines = await readLines(monitorOf(p2Sub), stop.signal);
+  const p2Session = text(p2Sub).match(/session_key="(wsc_[a-z2-7]+)"/)?.[1];
+  assert.ok(p2Session, text(p2Sub));
+  await assert.rejects((turn.emit as any)({ table: "t1" }, { hole: ["As", "Kd"], toCall: 2 }), /personal/);
+  assert.equal((await turn.emit({ table: "t1" }, { hole: ["As", "Kd"], toCall: 2 }, { to: "p1" })).matched, 1);
+  const p1Got = await p1Lines.expect("Your move: As Kd, 2 to call");
+  assert.deepEqual(p1Got.event?.data?.hole, ["As", "Kd"]);
+  await p2Lines.expectNothing();
+  await turn.emit({ table: "t1" }, { hole: ["7c", "7d"], toCall: 4 }, { to: "p2" });
+  await p2Lines.expect("Your move: 7c 7d, 4 to call");
+  await p1Lines.expectNothing();
+
+  // An event's publish URL: a POST's body is the payload, checked against
+  // the schema; a personal event's goes to the one subscriber it's for.
+  const post = (url: string, body: unknown) =>
+    fetch(url, { method: "POST", headers: { "Content-Type": "application/json" }, body: typeof body === "string" ? body : JSON.stringify(body) });
+  const buildUrl = await build.createPublishUrl({ repo: "acme" });
+  assert.equal(buildUrl.event, "ci.build");
+  assert.ok(buildUrl.url.startsWith(core + "/v1/publish/"), buildUrl.url);
+  const posted = await post(buildUrl.url, { conclusion: "success", url: "https://ci.example/2" });
+  assert.equal(posted.status, 202);
+  assert.equal(((await posted.json()) as any).matched, 1);
+  const viaUrl = await bobLines.expect("A CI run on a repo finished (repo acme)");
+  assert.equal(viaUrl.event?.data?.url, "https://ci.example/2");
+  const bad = await post(buildUrl.url, { conclusion: 1 });
+  assert.equal(bad.status, 400);
+  assert.equal(((await bad.json()) as any).error.code, "bad_payload");
+  await wake.revokePublishUrl(buildUrl.id);
+  assert.equal((await post(buildUrl.url, { conclusion: "success", url: "x" })).status, 410);
+  await assert.rejects((turn.createPublishUrl as any)({ table: "t1" }), /personal/);
+  const p2Url = await turn.createPublishUrl({ table: "t1" }, { to: "p2" });
+  assert.equal(((await (await post(p2Url.url, { hole: ["8c", "8d"], toCall: 1 })).json()) as any).matched, 1);
+  const viaTurnUrl = await p2Lines.expect("It's your move at a table (table t1)");
+  assert.deepEqual(viaTurnUrl.event?.data, { hole: ["8c", "8d"], toCall: 1 });
+  await p1Lines.expectNothing();
+  await wake.revokePublishUrl(p2Url.id);
+
+  // Native (a client that speaks MCP Events): events/subscribe, a webhook.
+  const hook = await receiver();
+  hooks.push(hook);
+  const chatgpt = await connect("openai-mcp", "p3");
+  const offered = (await chatgpt.listTools()).tools.map((x) => x.name).sort();
+  assert.deepEqual(offered, ["list_subscriptions", "unsubscribe_events"]);
+  const listed = (await chatgpt.request({ method: "events/list", params: {} } as any, z.any() as any)) as any;
+  assert.deepEqual(listed.events.map((e: any) => e.name).sort(), ["ci.build", "game.turn"]);
+  const nativeSub = (await chatgpt.request(
+    { method: "events/subscribe", params: { name: "game.turn", arguments: { table: "t1" }, delivery: { mode: "webhook", url: hook.url, secret: hook.secret }, ttlMs: 3600000 } } as any,
+    z.any() as any,
+  )) as any;
+  // The MCP SDK 2.x client drops resultType from a result on older revisions (the server sent it).
+  if (MCP === 1) assert.equal(nativeSub.resultType, "complete");
+  assert.match(nativeSub.id, /^sub_/);
+  await turn.emit({ table: "t1" }, { hole: ["Qh", "Qs"], toCall: 0 }, { to: "p3" });
+  await eventually("p3's webhook", async () => (hook.got.length === 1 ? true : undefined), 15000);
+  assert.equal(hook.got[0].name, "game.turn");
+  assert.deepEqual(hook.got[0].data, { hole: ["Qh", "Qs"], toCall: 0 });
+  assert.match(hook.got[0].meta?.["ai.wakeshift/text"] ?? "", /Your move: Qh Qs, 0 to call/);
+  // p1's turn never reaches p3's webhook.
+  await turn.emit({ table: "t1" }, { hole: ["2c", "3c"], toCall: 2 }, { to: "p1" });
+  await p1Lines.expect("Your move: 2c 3c, 2 to call");
+  await new Promise((r) => setTimeout(r, 700));
+  assert.equal(hook.got.length, 1);
+
+  // list_subscriptions and unsubscribe_events, by id (the native one) and by arguments (bridged).
+  const mine = text(await call(chatgpt, "list_subscriptions", {}));
+  const id = mine.match(/- ([0-9a-f-]{36}): game\.turn \{"table":"t1"\}, delivered to 127\.0\.0\.1/)?.[1];
+  assert.ok(id, mine);
+  assert.match(text(await call(chatgpt, "unsubscribe_events", { id })), /Stopped subscription/);
+  assert.match(text(await call(chatgpt, "list_subscriptions", {})), /no subscriptions/);
+  // A bridged conversation names itself with the session_key its result gave it, as the agent is told to.
+  assert.match(text(await call(p2, "unsubscribe_events", { event: "game.turn", arguments: { table: "t1" }, session_key: p2Session })), /Stopped game\.turn/);
+  assert.equal((await turn.emit({ table: "t1" }, { hole: ["9c", "9d"], toCall: 2 }, { to: "p2" })).matched, 0);
+});
+
+// attached.events end to end (internal/coretest/sdkwrapped_test.go, in
+// TypeScript): a tool that subscribes twice gets one block with one beacon,
+// then the short form; a failed call is rolled back; a native caller is
+// told what to subscribe to; and the app reaches the conversations it
+// stored with one multi-recipient emit.
+test("wrapped tools against a real core", { skip: !harness && "set WAKESHIFT_SDK_HARNESS (make sdk-e2e)" }, async (t) => {
+  const { core, key } = JSON.parse(readFileSync(harness!, "utf8")) as { core: string; key: string };
+  const wake = new Wakeshift({ key, core });
+  const turn = wake.defineEvent("game.turn", {
+    description: "It's your move.",
+    args: z.object({ table: z.string() }),
+    payload: z.object({ toCall: z.string() }),
+    text: (h, a) => `Your move at ${a.table}: ${h.toCall} to call`,
+    personal: true,
+  });
+  const subs = new Map<string, Made[]>();
+  // A stateless server, one per request, as such apps run; X-User is who's calling.
+  const http = createServer(async (req, res) => {
+    const server = new McpServer({ name: "cards", version: "1" });
+    const attached = wake.attach(server, { identify: (extra) => ({ user: headerOf(extra, "x-user") || undefined }) });
+    attached.registerTool(
+      "join",
+      { description: "Join a table (and the lobby)", inputSchema: { table: z.string() }, subscribes: [turn] },
+      async ({ table }, _ctx, call) => {
+        const got: Made[] = [];
+        for (const tbl of [table, "lobby"]) got.push((await call.subscribe(turn, { table: tbl }, { reason: `Playing at ${tbl}` })) as Made);
+        subs.set(call.user ?? "", got);
+        return `Seated at ${table}.`;
+      }
+    );
+    attached.registerTool(
+      "fails",
+      { inputSchema: { table: z.string() }, subscribes: [turn] },
+      async ({ table }, _ctx, call) => {
+        await call.subscribe(turn, { table });
+        throw new Error("that table is full");
+      }
+    );
+    const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined, enableJsonResponse: true });
+    res.on("close", () => void transport.close());
+    await server.connect(transport);
+    await transport.handleRequest(req, res);
+  });
+  await new Promise<void>((r) => http.listen(0, "127.0.0.1", r));
+  t.after(() => void http.close());
+  const url = `http://127.0.0.1:${(http.address() as AddressInfo).port}/mcp`;
+  const tool = async (user: string, ua: string, name: string, args: Record<string, unknown>, meta?: Record<string, unknown>): Promise<CallToolResult> => {
+    const resp = await fetch(url, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Accept: "application/json, text/event-stream", "X-User": user, "User-Agent": ua },
+      body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/call", params: { name, arguments: args, ...(meta ? { _meta: meta } : {}) } }),
+    });
+    const out = (await resp.json()) as { result?: CallToolResult };
+    assert.ok(out.result, JSON.stringify(out));
+    return out.result;
+  };
+  const listed = async (user: string) => (await wake.requestApp<{ subscriptions: unknown[] }>("POST", "/event-subscriptions/list", { user })).subscriptions;
+  const all = (r: CallToolResult) => r.content.map((c: any) => c.text ?? "").join("\n\n");
+
+  // One block, one beacon; both subscriptions the conversation's.
+  const codex = { "io.modelcontextprotocol/clientInfo": { name: "codex-mcp-client", version: "0.50.0" }, "x-codex-turn-metadata": { thread_id: "thread-ts-1" } };
+  const res = await tool("ada", "codex_exec/0.50.0", "join", { table: "oak" }, codex);
+  assert.ok(!res.isError && all(res).startsWith("Seated at oak.\n\n"), all(res));
+  assert.equal(typeof res._meta?.["wakeshift/connector"], "string");
+  assert.ok(all(res).split("wakeshift-beacon").length <= 2, all(res));
+  const first = subs.get("ada")!;
+  assert.equal(first.length, 2);
+  assert.ok(first.every((s) => s.state === "created") && first[0].session !== "" && first[0].session === first[1].session);
+  assert.equal(first[0].user, "ada");
+  assert.equal(first[0].recognized.harness, "codex");
+  assert.equal((await listed("ada")).length, 2);
+  // The next call in the thread: renewals, and the short form.
+  const again = await tool("ada", "codex_exec/0.50.0", "join", { table: "oak" }, codex);
+  assert.ok(all(again).length < all(res).length, `${all(res)}\n---\n${all(again)}`);
+  assert.equal(subs.get("ada")![0].state, "renewed");
+  assert.equal(subs.get("ada")![0].id, first[0].id);
+
+  // A failed call ends what it made, and its reply has no block.
+  const failed = await tool("bo", "claude-code/2.1.280", "fails", { table: "oak" });
+  assert.equal(failed.isError, true);
+  assert.ok(!all(failed).includes("Wakeshift"), all(failed));
+  assert.deepEqual(await listed("bo"), []);
+
+  // A native caller isn't subscribed: the block names what to subscribe to.
+  const native = await tool("cy", "openai-mcp/1.0.0", "join", { table: "oak" }, { "openai/session": "chat-1" });
+  for (const tbl of ["oak", "lobby"]) assert.ok(all(native).includes(`To be woken by game.turn with {"table":"${tbl}"}, subscribe to it (MCP Events).`), all(native));
+  assert.equal((subs.get("cy")![0] as Subscription).state, "native");
+  assert.deepEqual(await listed("cy"), []);
+
+  // One emit to the stored conversations: by subscription, a user with
+  // nothing (unmatched), and natively.
+  await tool("dee", "claude-code/2.1.280", "join", { table: "oak" });
+  const ada = subs.get("ada")![0];
+  const dee = subs.get("dee")![0];
+  let got = await turn.emit(
+    { table: "oak" },
+    { toCall: "5" },
+    { to: [{ user: ada.user, subscription: ada.id }, { user: dee.user, subscription: dee.id }, "nobody", { native: "ada" }], id: "ts-hand-1" },
+  );
+  assert.equal(got.matched, 2, JSON.stringify(got));
+  assert.deepEqual(got.ended, []);
+  assert.deepEqual(got.unmatched, ["nobody", { native: "ada" }]);
+  // dee's subscription ends; an emit naming it hears so, and a retry keeps it.
+  assert.equal(await turn.end(dee.user, dee.id), true);
+  const to = [
+    { user: dee.user, subscription: dee.id },
+    { user: ada.user, subscription: ada.id },
+  ];
+  got = await turn.emit({ table: "oak" }, { toCall: "10" }, { to, id: "ts-hand-2" });
+  assert.equal(got.matched, 1, JSON.stringify(got));
+  assert.deepEqual(got.ended, [{ user: "dee", subscription: dee.id }]);
+  got = await turn.emit({ table: "oak" }, { toCall: "10" }, { to, id: "ts-hand-2" });
+  assert.equal(got.duplicate, true);
+  assert.equal(got.ended.length, 1);
+});
+
+// Round 2: a server without identify (no user). list_subscriptions and
+// unsubscribe_events by id act on the calling conversation, found by its
+// session_key; a call that subscribes and unsubscribes gets no block; and
+// onSubscribe runs once for the subscription the tool created.
+test("a server without identify: the conversation's own subscriptions, against a real core", { skip: !harness && "set WAKESHIFT_SDK_HARNESS (make sdk-e2e)" }, async (t) => {
+  const { core, key } = JSON.parse(readFileSync(harness!, "utf8")) as { core: string; key: string };
+  const wake = new Wakeshift({ key, core, logger: quiet });
+  t.after(() => wake.close());
+  const hooked: { via: string; tool?: string; args: unknown }[] = [];
+  const done = wake.defineEvent("render.done", {
+    description: "A render finished",
+    args: z.object({ job: z.string() }),
+    payload: z.object({ ok: z.boolean() }),
+    onSubscribe: (s) => void hooked.push({ via: s.via, tool: s.tool, args: s.args }),
+  });
+  const sessions = new Map<string, string | null>();
+  const http = createServer(async (req, res) => {
+    const server = new McpServer({ name: "render", version: "1" });
+    const attached = wake.attach(server);
+    attached.registerTool("render", { description: "Start a render", inputSchema: { job: z.string() }, subscribes: [done] }, async ({ job }, _ctx, call) => {
+      sessions.set(`${job}:before`, call.session);
+      await call.subscribe(done, { job });
+      sessions.set(job, call.session);
+      return `Rendering ${job}.`;
+    });
+    attached.registerTool("try_render", { description: "Start and cancel a render", inputSchema: { job: z.string() }, subscribes: [done] }, async ({ job }, _ctx, call) => {
+      await call.subscribe(done, { job });
+      await call.unsubscribe(done, { job });
+      return `Canceled ${job}.`;
+    });
+    const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined, enableJsonResponse: true });
+    res.on("close", () => void transport.close());
+    await server.connect(transport);
+    await transport.handleRequest(req, res);
+  });
+  await new Promise<void>((r) => http.listen(0, "127.0.0.1", r));
+  t.after(() => void http.close());
+  const url = `http://127.0.0.1:${(http.address() as AddressInfo).port}/mcp`;
+  const tool = async (name: string, args: Record<string, unknown>): Promise<CallToolResult> => {
+    const resp = await fetch(url, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Accept: "application/json, text/event-stream", "User-Agent": "claude-code/2.1.280 (external, cli)" },
+      body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/call", params: { name, arguments: args } }),
+    });
+    const out = (await resp.json()) as { result?: CallToolResult };
+    assert.ok(out.result, JSON.stringify(out));
+    return out.result;
+  };
+  const all = (r: CallToolResult) => r.content.map((c: any) => c.text ?? "").join("\n\n");
+
+  const first = await tool("render", { job: "j1", session_key: "wsc_forgedforgedforgedforgedforged1" });
+  assert.ok(!first.isError, all(first));
+  assert.equal(sessions.get("j1:before"), null, "call.session is null until the core resolved it");
+  const session = sessions.get("j1")!;
+  assert.match(session, /^wsc_/);
+  assert.notEqual(session, "wsc_forgedforgedforgedforgedforged1");
+  await new Promise((r) => setTimeout(r, 200));
+  assert.deepEqual(hooked, [{ via: "tool", tool: "render", args: { job: "j1" } }]);
+
+  // list_subscriptions by the conversation's key; without it, nothing (no error).
+  const mine = await tool("list_subscriptions", { session_key: session });
+  assert.ok(!mine.isError, all(mine));
+  const listed = (mine.structuredContent as { subscriptions: { id: string; event: string }[] }).subscriptions;
+  assert.equal(listed.length, 1, all(mine));
+  assert.equal(listed[0].event, "render.done");
+  const none = await tool("list_subscriptions", {});
+  assert.ok(!none.isError, all(none));
+  assert.equal((none.structuredContent as { subscriptions: unknown[] }).subscriptions.length, 0);
+
+  // unsubscribe_events by id: another conversation's key ends nothing; its own ends it.
+  const other = await tool("render", { job: "j2" });
+  assert.ok(!other.isError, all(other));
+  const otherSession = sessions.get("j2")!;
+  const wrong = await tool("unsubscribe_events", { id: listed[0].id, session_key: otherSession });
+  assert.equal((wrong.structuredContent as { ended: boolean }).ended, false, all(wrong));
+  const right = await tool("unsubscribe_events", { id: listed[0].id, session_key: session });
+  assert.equal((right.structuredContent as { ended: boolean }).ended, true, all(right));
+  assert.equal(((await tool("list_subscriptions", { session_key: session })).structuredContent as { subscriptions: unknown[] }).subscriptions.length, 0);
+
+  // Subscribed and unsubscribed in one call: the result has no block.
+  const canceled = await tool("try_render", { job: "j3", session_key: otherSession });
+  assert.ok(!canceled.isError, all(canceled));
+  assert.equal(all(canceled), "Canceled j3.");
+});
+
+// Polling and the wait task against a real core, on protocol 2026-07-28
+// (2.x: createMcpHandler, a server per request), as clients that poll
+// reach an app: MCP Events' events/poll (the first poll subscribes, a
+// later one returns the emit), and Claude Code's wakeshift_wait, answered
+// with a task that tasks/get follows until the emit completes it. On
+// @modelcontextprotocol/server before 2.3.0, tasks/get on this revision
+// never reaches attach (the MCP SDK answers -32601 itself), so this test
+// pins the peer range's floor: CI runs it against the floor too.
+test("polling and the wait task against a real core", { skip: !harness && "set WAKESHIFT_SDK_HARNESS (make sdk-e2e)" }, async () => {
+  const { core, key } = JSON.parse(readFileSync(harness!, "utf8")) as { core: string; key: string };
+  const wake = new Wakeshift({ key, core });
+  const build = ciBuild(wake);
+  const send = await rawRpc(() => {
+    const server = new McpServer({ name: "ci-bot", version: "1.0" });
+    const attached = wake.attach(server, { identify: () => ({ user: "poller" }), builtinTools: { wait: true } });
+    attached.registerTool(
+      "watch",
+      { inputSchema: { repo: z.string() }, subscribes: [build] },
+      async ({ repo }, _ctx, call) => {
+        await call.subscribe(build, { repo });
+        return `Watching ${repo}.`;
+      }
+    );
+    return server;
+  });
+  // One 2026-07-28 request from a client with these capabilities (test/mcp.ts's rawRpc adds its headers).
+  const rpc = (method: string, params: Record<string, unknown>, client: string, caps: Record<string, unknown>): Promise<any> =>
+    send(method, {
+      ...params,
+      _meta: {
+        "io.modelcontextprotocol/protocolVersion": "2026-07-28",
+        "io.modelcontextprotocol/clientInfo": { name: client, version: "1.0" },
+        "io.modelcontextprotocol/clientCapabilities": caps,
+      },
+    });
+
+  // events/poll: the first poll subscribes from now; the emit is a later poll's.
+  const events = { extensions: { "io.modelcontextprotocol/events": {} } };
+  const poll = (cursor: string | null) => rpc("events/poll", { name: "ci.build", arguments: { repo: "polled" }, cursor }, "a-poller", events);
+  const first = await poll(null);
+  assert.ok(first.result, JSON.stringify(first));
+  assert.deepEqual(first.result.events, []);
+  assert.equal((await build.emit({ repo: "polled" }, { branch: "main", text: "polled build" })).matched, 1);
+  const polled = await eventually("the polled event", async () => {
+    const r = await poll(first.result.cursor);
+    assert.ok(r.result, JSON.stringify(r));
+    return r.result.events.length > 0 ? r.result : undefined;
+  });
+  assert.equal(polled.events[0].name, "ci.build");
+  assert.deepEqual(polled.events[0].data, { branch: "main", text: "polled build" });
+
+  // The wait task: a wrapped tool subscribes the conversation and says to
+  // call wakeshift_wait; its task completes with the emit.
+  const tasks = { extensions: { "io.modelcontextprotocol/tasks": {} } };
+  const listed = await rpc("tools/list", {}, "claude-code", tasks);
+  assert.ok(listed.result?.tools.some((x: any) => x.name === "wakeshift_wait"), JSON.stringify(listed));
+  const watched = await rpc("tools/call", { name: "watch", arguments: { repo: "tasked" } }, "claude-code", tasks);
+  assert.ok(watched.result, JSON.stringify(watched));
+  const said = text(watched.result);
+  const session = said.match(/session_key="(wsc_[a-z2-7]+)"/)?.[1];
+  assert.ok(session && said.includes("wakeshift_wait"), said);
+  const started = await rpc("tools/call", { name: "wakeshift_wait", arguments: { session_key: session } }, "claude-code", tasks);
+  assert.equal(started.result?.resultType, "task", JSON.stringify(started));
+  const taskId = started.result.taskId as string;
+  assert.match(taskId, /^wkt1_/);
+  const held = rpc("tasks/get", { taskId }, "claude-code", tasks);
+  await new Promise((r) => setTimeout(r, 300));
+  assert.equal((await build.emit({ repo: "tasked" }, { branch: "main", text: "tasked build" })).matched, 1);
+  let got = await held;
+  for (let i = 0; got.result?.status === "working" && i < 3; i++) got = await rpc("tasks/get", { taskId }, "claude-code", tasks);
+  assert.equal(got.result?.status, "completed", `tasks/get: ${JSON.stringify(got)}`);
+  assert.match(JSON.stringify(got.result), /tasked build/);
+
+  // Without wait (attach's default), the same Claude Code, whose requests
+  // take tasks, sees no wait tool, and Wakeshift tells it about the plugin,
+  // with the Monitor as the fallback: nothing names wakeshift_wait.
+  const sendOff = await rawRpc(() => {
+    const server = new McpServer({ name: "ci-bot", version: "1.0" });
+    const attached = wake.attach(server, { identify: () => ({ user: "no-wait" }) });
+    attached.registerTool(
+      "watch",
+      { inputSchema: { repo: z.string() }, subscribes: [build] },
+      async ({ repo }, _ctx, call) => {
+        await call.subscribe(build, { repo });
+        return `Watching ${repo}.`;
+      }
+    );
+    return server;
+  });
+  // Real Claude Code names each tool call (claudecode/toolUseId), which the
+  // plugin's beacon is bound to; a call without it gets only the Monitor.
+  const rpcOff = (method: string, params: Record<string, unknown>, meta: Record<string, unknown> = {}): Promise<any> =>
+    sendOff(method, {
+      ...params,
+      _meta: {
+        "io.modelcontextprotocol/protocolVersion": "2026-07-28",
+        "io.modelcontextprotocol/clientInfo": { name: "claude-code", version: "1.0" },
+        "io.modelcontextprotocol/clientCapabilities": tasks,
+        ...meta,
+      },
+    });
+  const offList = await rpcOff("tools/list", {});
+  assert.ok(offList.result && !offList.result.tools.some((x: any) => x.name === "wakeshift_wait"), JSON.stringify(offList));
+  const offWatched = await rpcOff("tools/call", { name: "watch", arguments: { repo: "untasked" } }, { "claudecode/toolUseId": "toolu_e2e_untasked" });
+  assert.ok(offWatched.result, JSON.stringify(offWatched));
+  const offSaid = text(offWatched.result);
+  assert.ok(!offSaid.includes("wakeshift_wait"), offSaid);
+  assert.match(offSaid, /Monitor/, offSaid);
+  assert.match(offSaid, /Notify me in every session/, offSaid);
+});
+
+// A ChatGPT-shaped client against a real core with subscribe vouchers:
+// clientInfo openai-mcp on protocol
+// 2026-07-28, no Mcp-Session-Id, _meta["openai/session"] on tool calls, a
+// webhook on 127.0.0.1. A tool subscribes it to a tools-only event; an emit
+// lands before the "person" asks; a scripted "model" copies the voucher
+// from the result into events/subscribe. Skipped on a core that doesn't
+// report subscribe_vouchers.
+test("a ChatGPT-shaped client redeems a subscribe voucher against a real core", { skip: !harness && "set WAKESHIFT_SDK_HARNESS (make sdk-e2e)" }, async (t) => {
+  const { core, key } = JSON.parse(readFileSync(harness!, "utf8")) as { core: string; key: string };
+  const wake = new Wakeshift({ key, core, logger: quiet });
+  const subscribed: { user?: string; via: string; tool?: string; args: unknown }[] = [];
+  const crawl = wake.defineEvent("crawl.finished", {
+    description: "A crawl finished.",
+    args: z.object({ job: z.string() }),
+    payload: z.object({ pages: z.number() }),
+    text: (p, a) => `Crawl ${a.job} finished: ${p.pages} pages`,
+    onSubscribe: (s) => void subscribed.push({ user: s.user, via: s.via, tool: s.tool, args: s.args }),
+  });
+  const send = await rawRpc(() => {
+    const server = new McpServer({ name: "crawler", version: "1.0" });
+    const attached = wake.attach(server);
+    attached.registerTool("start_crawl", { inputSchema: { job: z.string() }, subscribes: [crawl] }, async ({ job }, _ctx, call) => {
+      await call.subscribe(crawl, { job });
+      return `Crawl ${job} started.`;
+    });
+    return server;
+  });
+  const rpc = (method: string, params: Record<string, unknown>, chat: string): Promise<any> =>
+    send(method, {
+      ...params,
+      _meta: {
+        ...(method === "tools/call" ? { "openai/session": chat } : {}),
+        "io.modelcontextprotocol/protocolVersion": "2026-07-28",
+        "io.modelcontextprotocol/clientInfo": { name: "openai-mcp", version: "1.0.0" },
+        "io.modelcontextprotocol/clientCapabilities": { extensions: { "io.modelcontextprotocol/events": {} } },
+      },
+    });
+
+  // The webhook ChatGPT gives: answers the verification, records events.
+  const got: { data: any; name: string }[] = [];
+  const hook = createServer((req, res) => {
+    let body = "";
+    req.on("data", (c) => (body += c));
+    req.on("end", () => {
+      const m = JSON.parse(body);
+      res.setHeader("Content-Type", "application/json");
+      if (m.type === "verification") return res.end(JSON.stringify({ challenge: m.challenge }));
+      if (m.name) got.push({ name: m.name, data: m.data });
+      res.end("{}");
+    });
+  });
+  await new Promise<void>((r) => hook.listen(0, "127.0.0.1", r));
+  t.after(() => void hook.close());
+  const delivery = { mode: "webhook", url: `http://127.0.0.1:${(hook.address() as AddressInfo).port}/hook`, secret: "whsec_" + randomBytes(32).toString("base64") };
+
+  const job = "j" + randomBytes(4).toString("hex");
+  // The tool's result hands out the voucher.
+  const called = await rpc("tools/call", { name: "start_crawl", arguments: { job } }, "chat-1");
+  assert.ok(called.result && !called.result.isError, JSON.stringify(called));
+  // Asked after the first request: on 2.x the server is made per request, so attach (and the manifest) come with it.
+  if (!(await wake.vouchersOffered())) return t.skip("the core doesn't hand out subscribe vouchers");
+  const said = text(called.result);
+  const line = new RegExp(
+    `To be woken by crawl\\.finished with \\{"job":"${job}"\\}, subscribe to it \\(MCP Events\\) with wakeshift_voucher set to (wsv_[a-z2-7]{32}) in its arguments\\. It works once, for these arguments\\.`,
+  );
+  const voucher = said.match(line)?.[1];
+  assert.ok(voucher, said);
+  assert.ok(String(called.result.structuredContent?.wakeshift ?? said).includes(voucher!));
+
+  // The job finishes before the person asks.
+  assert.equal((await crawl.emit({ job }, { pages: 1 })).matched, 0);
+
+  // events/list offers the event, with a required wakeshift_voucher.
+  const listed = await rpc("events/list", {}, "chat-1");
+  const entry = listed.result?.events.find((e: any) => e.name === "crawl.finished");
+  assert.ok(entry, JSON.stringify(listed));
+  assert.deepEqual(entry.inputSchema.required, ["job", "wakeshift_voucher"]);
+  assert.match(entry.inputSchema.properties.wakeshift_voucher.description, /^The voucher from .+'s tool result\. Only its tools hand them out\.$/);
+
+  // The model copies the voucher into the arguments.
+  const params = { name: "crawl.finished", arguments: { job, wakeshift_voucher: voucher }, delivery, ttlMs: 3_600_000 };
+  const sub = await rpc("events/subscribe", params, "chat-1");
+  assert.ok(sub.result?.id, JSON.stringify(sub));
+  await eventually("the replayed emit", async () => (got.length >= 1 ? true : undefined), 10_000);
+  assert.deepEqual(got[0], { name: "crawl.finished", data: { pages: 1 } });
+  assert.equal((await crawl.emit({ job }, { pages: 2 })).matched, 1);
+  await eventually("the live emit", async () => (got.length >= 2 ? true : undefined), 10_000);
+  assert.deepEqual(got[1], { name: "crawl.finished", data: { pages: 2 } });
+
+  // A refresh with the same arguments, URL and secret keeps it.
+  const again = await rpc("events/subscribe", params, "chat-1");
+  assert.equal(again.result?.id, sub.result.id, JSON.stringify(again));
+  assert.equal((await crawl.emit({ job }, { pages: 3 })).matched, 1);
+  await eventually("the emit after the refresh", async () => (got.length >= 3 ? true : undefined), 10_000);
+
+  // A second client with the same IDs and no voucher is refused.
+  const other = await rpc("events/subscribe", { ...params, arguments: { job }, delivery: { ...delivery, url: delivery.url + "2" } }, "chat-2");
+  assert.equal(other.error?.code, -32012, JSON.stringify(other));
+  // Nor does the spent voucher make a second subscription.
+  const spent = await rpc("events/subscribe", { ...params, delivery: { ...delivery, url: delivery.url + "3" } }, "chat-2");
+  assert.equal(spent.error?.code, -32012, JSON.stringify(spent));
+  assert.doesNotMatch(JSON.stringify(spent), /wsv_/);
+
+  assert.deepEqual(subscribed, [{ user: undefined, via: "tool", tool: "start_crawl", args: { job } }]);
+  const ended = await rpc("events/unsubscribe", { name: "crawl.finished", arguments: { job, wakeshift_voucher: voucher }, delivery }, "chat-1");
+  assert.ok(ended.result, JSON.stringify(ended));
+  assert.equal((await crawl.emit({ job }, { pages: 4 })).matched, 0);
+  await wake.close();
+});

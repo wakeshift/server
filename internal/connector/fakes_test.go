@@ -1,0 +1,222 @@
+package connector
+
+import (
+	"context"
+	"crypto/ed25519"
+	"crypto/rand"
+	"encoding/base64"
+	"encoding/json"
+	"net/http"
+	"net/http/httptest"
+	"slices"
+	"strings"
+	"sync"
+	"testing"
+	"time"
+
+	"github.com/wakeshift/server/internal/beacon"
+	"github.com/wakeshift/server/internal/jws"
+)
+
+// fakeWakeshift serves JWKS and the redeem endpoint, as the core does.
+type fakeWakeshift struct {
+	*httptest.Server
+	key      ed25519.PrivateKey
+	mu       sync.Mutex
+	redeemed []string
+	status   int
+	code     string
+	reason   string // the error's reason, if any (conversation_taken's link_not_held)
+	// tool is the tool its beacons name (beacon.Claims.Tool): "probe", the
+	// tool in the recorded hook inputs.
+	tool string
+	// held is the link each redeem said the hook held ("" for none).
+	held []string
+	// late is whether each redeem said it was late (installedSince).
+	late []bool
+	// app, if set, is what redeems say about the beacon's app.
+	app *RedeemedApp
+	// answer, if set, is the stream link redeems answer with (default: one
+	// on its own origin).
+	answer string
+	// onRedeem, if set, runs before a redeem is answered, with the link the
+	// hook held: what the core does then (superseding it revokes it).
+	onRedeem func(held string)
+}
+
+func newFakeWakeshift(t *testing.T) *fakeWakeshift {
+	t.Helper()
+	pub, priv, _ := ed25519.GenerateKey(rand.Reader)
+	f := &fakeWakeshift{key: priv, status: 200, tool: "probe"}
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /oauth/jwks", func(w http.ResponseWriter, r *http.Request) {
+		json.NewEncoder(w).Encode(map[string]any{"keys": []any{map[string]string{"kty": "OKP", "crv": "Ed25519", "kid": "k1",
+			"x": base64.RawURLEncoding.EncodeToString(pub)}}})
+	})
+	mux.HandleFunc("POST /v1/connector/redeem", func(w http.ResponseWriter, r *http.Request) {
+		var in struct {
+			Ticket, Thread, Held string
+			Late                 bool
+		}
+		json.NewDecoder(r.Body).Decode(&in)
+		f.mu.Lock()
+		f.redeemed = append(f.redeemed, in.Ticket+"@"+in.Thread)
+		f.held = append(f.held, in.Held)
+		f.late = append(f.late, in.Late)
+		status, code, reason, app, answer, onRedeem := f.status, f.code, f.reason, f.app, f.answer, f.onRedeem
+		f.mu.Unlock()
+		if onRedeem != nil {
+			onRedeem(in.Held)
+		}
+		w.WriteHeader(status)
+		if status != 200 {
+			e := map[string]string{"code": code}
+			if reason != "" {
+				e["reason"] = reason
+			}
+			json.NewEncoder(w).Encode(map[string]any{"error": e})
+			return
+		}
+		out := map[string]any{"url": "ws://" + r.Host + "/v1/stream?link=tok-" + in.Thread}
+		if answer != "" {
+			out["url"] = answer
+		}
+		if app != nil {
+			out["app"] = app
+		}
+		json.NewEncoder(w).Encode(out)
+	})
+	f.Server = httptest.NewServer(mux)
+	t.Cleanup(f.Close)
+	return f
+}
+
+func (f *fakeWakeshift) beacon(t *testing.T, conversation string, key ed25519.PrivateKey) string {
+	t.Helper()
+	return f.sign(t, conversation, "chat", key)
+}
+
+// beaconFor is a beacon for another app.
+func (f *fakeWakeshift) beaconFor(t *testing.T, conversation, app string) string {
+	t.Helper()
+	return f.sign(t, conversation, app, nil)
+}
+
+func (f *fakeWakeshift) sign(t *testing.T, conversation, app string, key ed25519.PrivateKey) string {
+	t.Helper()
+	if key == nil {
+		key = f.key
+	}
+	tok, err := jws.Sign(key, "k1", beacon.Type, beacon.Claims{Issuer: f.URL, Audience: beacon.Audience, Thread: conversation, App: app, Tool: f.tool,
+		Redeem: f.URL + "/v1/connector/redeem", Ticket: "wst_t", IssuedAt: time.Now().Unix(), Expires: time.Now().Add(time.Minute).Unix()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return tok
+}
+
+func (f *fakeWakeshift) redemptions() []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]string(nil), f.redeemed...)
+}
+
+// fakePoller is the long-poll contract in memory: queued deliveries per
+// link, handed out until acked.
+type fakePoller struct {
+	mu     sync.Mutex
+	queue  map[string][]Delivery // link → pending
+	acked  []string
+	polls  []time.Duration
+	err    error
+	rotate string
+	arrive chan struct{} // closed to release a waiting poll
+}
+
+func newFakePoller() *fakePoller { return &fakePoller{queue: map[string][]Delivery{}} }
+
+// ackedNow is what was acked so far.
+func (p *fakePoller) ackedNow() []string {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return slices.Clone(p.acked)
+}
+
+func (p *fakePoller) add(link string, ds ...Delivery) {
+	p.mu.Lock()
+	p.queue[link] = append(p.queue[link], ds...)
+	p.mu.Unlock()
+}
+
+func (p *fakePoller) Poll(ctx context.Context, link string, wait time.Duration, patient bool) (Batch, error) {
+	p.mu.Lock()
+	p.polls = append(p.polls, wait)
+	err, rotate, arrive := p.err, p.rotate, p.arrive
+	q := append([]Delivery(nil), p.queue[link]...)
+	p.mu.Unlock()
+	if err != nil {
+		return Batch{}, err
+	}
+	if len(q) == 0 && wait > 0 {
+		t := time.NewTimer(wait)
+		defer t.Stop()
+		select {
+		case <-ctx.Done():
+			return Batch{}, ctx.Err()
+		case <-t.C:
+		case <-arrive:
+		}
+		p.mu.Lock()
+		q = append([]Delivery(nil), p.queue[link]...)
+		p.mu.Unlock()
+	}
+	return Batch{Deliveries: q, Link: rotate}, nil
+}
+
+func (p *fakePoller) Ack(ctx context.Context, link string, ids []string) error {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.acked = append(p.acked, ids...)
+	var kept []Delivery
+	for _, d := range p.queue[link] {
+		if !contains(ids, d.ID) {
+			kept = append(kept, d)
+		}
+	}
+	p.queue[link] = kept
+	return nil
+}
+
+func contains(l []string, s string) bool {
+	for _, x := range l {
+		if x == s {
+			return true
+		}
+	}
+	return false
+}
+
+func msg(id, body string) Delivery {
+	return Delivery{ID: id, Attempt: 1, Event: map[string]any{"id": "ev-" + id, "type": "chat.message", "body": body,
+		"from": map[string]any{"kind": "agent", "id": "ada"}}}
+}
+
+func setHome(t *testing.T) string {
+	t.Helper()
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("WAKESHIFT_HOME", home+"/.wakeshift")
+	for _, k := range []string{"XDG_CONFIG_HOME", "XDG_DATA_HOME", "CODEX_HOME", "CLAUDE_CONFIG_DIR", "COPILOT_HOME", "CURSOR_CONFIG_DIR", "OPENCODE_CONFIG_DIR", "OPENCODE_CONFIG", "PI_CODING_AGENT_DIR"} {
+		t.Setenv(k, "")
+	}
+	return home
+}
+
+func has(s string, subs ...string) bool {
+	for _, x := range subs {
+		if !strings.Contains(s, x) {
+			return false
+		}
+	}
+	return true
+}

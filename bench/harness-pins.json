@@ -1,0 +1,9 @@
+{
+  "//": "The harness releases the bench pins: the last release of each that passed the bench. bench/releases/install-harness.sh puts each in ~/.wakeshift-bench. claude-agent-sdk is the Claude Agent SDK the claude-code-sdk lane runs, with the Claude Code it bundles (install-harness.sh claude-agent-sdk). claude-code-floor is the oldest Claude Code the core's offers support (before 2.1.292 its plugin install is two steps): WB_CLAUDE_PIN=floor runs it (bench/README.md). codex-floor is the oldest Codex the core's offers and Codex's plugin support: WB_CODEX_PIN=floor runs it. opencode is npm's opencode-ai (1.x): Wakeshift's plugin doesn't load on opencode 2.x (@opencode/cli) yet, so the opencode lane refuses 2.x unless WB_OPENCODE_2=1.",
+  "claude-agent-sdk": "0.3.323",
+  "claude-code": "2.1.331",
+  "claude-code-floor": "2.1.280",
+  "codex": "0.169.0",
+  "codex-floor": "0.163.0",
+  "opencode": "1.19.5"
+}

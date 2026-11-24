@@ -1,0 +1,264 @@
+# gitleaks' configuration (CI: .github/workflows/ci.yml): its default rules,
+# and every known false positive in this repository, one file at a time,
+# with why it's harmless. Each entry names only the rules that matched it,
+# so a different kind of secret in the same file is still reported. A new
+# hit is a real finding until someone reads it and adds it here with a
+# reason; never allowlist a directory.
+
+[extend]
+useDefault = true
+
+# The SDKs' shared fixtures (the golden files every SDK's tests read).
+
+[[allowlists]]
+description = "App keys made from the fixture seeds in the same file (all zeros, 0x00..0x1f, a 0xdeadbeef pattern, all 0xff), and malformed keys the parser must refuse"
+targetRules = ["generic-api-key"]
+paths = ['''(^|/)sdk/typescript/test/app-keys\.json$''']
+
+[[allowlists]]
+description = "WAKESHIFT_KEY values in the disabled-client fixture: three of app-keys.json's fixture keys"
+targetRules = ["generic-api-key"]
+paths = ['''(^|/)sdk/typescript/test/disabled-client\.json$''']
+
+[[allowlists]]
+description = "One fixture webhook signing secret (whsec_), used throughout the MCP Events wire fixture with https://agent.example"
+targetRules = ["generic-api-key"]
+paths = ['''(^|/)sdk/typescript/test/mcp-events-wire\.json$''']
+
+[[allowlists]]
+description = "Inputs the secret scrubber must redact: a made-up signing secret and JWTs signed by no real issuer"
+targetRules = ["generic-api-key", "jwt"]
+paths = ['''(^|/)sdk/typescript/test/secret-pattern\.json$''']
+
+# Go tests: canaries a test checks never reach a log, and test vectors.
+
+[[allowlists]]
+description = "A made-up webhook secret the test signs with"
+targetRules = ["generic-api-key"]
+paths = ['''(^|/)internal/agenthooks/agenthooks_test\.go$''']
+
+[[allowlists]]
+description = "A made-up bot ID and setup code for the bot-key format's test"
+targetRules = ["generic-api-key"]
+paths = ['''(^|/)internal/botkeys/commands_test\.go$''']
+
+[[allowlists]]
+description = "Canary watch-URL secrets the test checks never reach a log"
+targetRules = ["generic-api-key"]
+paths = ['''(^|/)internal/coretest/capy_webhook_test\.go$''']
+
+[[allowlists]]
+description = "A canary the test checks telemetry never exports"
+targetRules = ["generic-api-key"]
+paths = ['''(^|/)internal/coretest/telemetry_capy_test\.go$''']
+
+[[allowlists]]
+description = "A Standard Webhooks test vector: a published example secret and the signature it gives"
+targetRules = ["generic-api-key"]
+paths = ['''(^|/)internal/mcpevents/verify_test\.go$''']
+
+[[allowlists]]
+description = "An Ed25519 public key (no private half), for the OAuth tests"
+targetRules = ["generic-api-key"]
+paths = ['''(^|/)internal/oauth/oauth_test\.go$''']
+
+[[allowlists]]
+description = "Canary tokens the log scrubber must redact"
+targetRules = ["generic-api-key"]
+paths = ['''(^|/)internal/telemetry/(logscrub|scrub)_test\.go$''']
+
+# The Hermes plugin's tests (Python).
+
+[[allowlists]]
+description = "Made-up session keys a fake core hands the plugin in its tests"
+targetRules = ["generic-api-key"]
+paths = ['''(^|/)plugins/hermes/tests/test_plugin\.py$''']
+
+# The bench subset (the harness runner) and the SDKs it builds
+# (sdk/typescript, sdk/python, pkg/wakeshift, whose own repositories
+# publish them too): fixtures and canaries.
+
+[[allowlists]]
+description = "One of app-keys.json's fixture app keys (made from patterned seeds), used as a test key"
+targetRules = ["generic-api-key"]
+paths = ['''(^|/)bench/test/elicit\.test\.ts$''']
+
+[[allowlists]]
+description = "The redaction tests' made-up token, an app-keys.json fixture key, and a beacon signed by a test key: what the bench's report must redact"
+targetRules = ["generic-api-key", "jwt"]
+paths = ['''(^|/)bench/test/unit\.test\.ts$''']
+
+[[allowlists]]
+description = "A made-up token in Wakeshift's shapes (the file says none is a real credential)"
+targetRules = ["generic-api-key"]
+paths = ['''(^|/)bench/test/visible\.test\.ts$''']
+
+[[allowlists]]
+description = "One of app-keys.json's fixture app keys (made from patterned seeds), used as a test key"
+targetRules = ["generic-api-key"]
+paths = ['''(^|/)pkg/wakeshift/helpers_test\.go$''']
+
+[[allowlists]]
+description = "One of app-keys.json's fixture app keys (made from patterned seeds), used as a test key"
+targetRules = ["generic-api-key"]
+paths = ['''(^|/)pkg/wakeshift/helpers_internal_test\.go$''']
+
+[[allowlists]]
+description = "One of app-keys.json's fixture app keys (made from patterned seeds), used as a test key"
+targetRules = ["generic-api-key"]
+paths = ['''(^|/)pkg/wakeshift/mcpgo/mcpgo_test\.go$''']
+
+[[allowlists]]
+description = "One of app-keys.json's fixture app keys (made from patterned seeds), used as a test key, as the canary a logger mustn't print"
+targetRules = ["generic-api-key"]
+paths = ['''(^|/)pkg/wakeshift/testdata/zapleak/leak_test\.go$''']
+
+[[allowlists]]
+description = "mcp-events-wire.json's fixture webhook secret (whsec_), with an example.com or agent.example URL"
+targetRules = ["generic-api-key"]
+paths = ['''(^|/)pkg/wakeshift/interop_golden_internal_test\.go$''']
+
+[[allowlists]]
+description = "mcp-events-wire.json's fixture webhook secret (whsec_), with an example.com or agent.example URL"
+targetRules = ["generic-api-key"]
+paths = ['''(^|/)pkg/wakeshift/vouchers_internal_test\.go$''']
+
+[[allowlists]]
+description = "Not a secret: a dataclass field declaration (private_key: … = field(repr=False))"
+targetRules = ["generic-api-key"]
+paths = ['''(^|/)sdk/python/src/wakeshift/_key\.py$''']
+
+[[allowlists]]
+description = "A fixture webhook secret: whsec_ and base64 of the word test"
+targetRules = ["generic-api-key"]
+paths = ['''(^|/)sdk/python/tests/test_identity\.py$''']
+
+[[allowlists]]
+description = "mcp-events-wire.json's fixture webhook secret (whsec_), with an example.com or agent.example URL"
+targetRules = ["generic-api-key"]
+paths = ['''(^|/)sdk/python/tests/test_interop\.py$''']
+
+[[allowlists]]
+description = "mcp-events-wire.json's fixture webhook secret (whsec_), with an example.com or agent.example URL"
+targetRules = ["generic-api-key"]
+paths = ['''(^|/)sdk/python/tests/test_vouchers\.py$''']
+
+[[allowlists]]
+description = "A made-up session key the test passes as a tool argument"
+targetRules = ["generic-api-key"]
+paths = ['''(^|/)sdk/python/tests/test_fastmcp23\.py$''']
+
+[[allowlists]]
+description = "A canary the secret-handling tests check is never printed"
+targetRules = ["generic-api-key"]
+paths = ['''(^|/)sdk/python/tests/test_secrets\.py$''']
+
+[[allowlists]]
+description = "A made-up session key passed as a tool argument"
+targetRules = ["generic-api-key"]
+paths = ['''(^|/)sdk/python/tests/test_toolcall\.py$''']
+
+[[allowlists]]
+description = "One of app-keys.json's fixture app keys (made from patterned seeds), used as a test key, against a fake core (https://core.test)"
+targetRules = ["generic-api-key"]
+paths = ['''(^|/)sdk/typescript/scripts/pack\-check/cjs\.ts$''']
+
+[[allowlists]]
+description = "One of app-keys.json's fixture app keys (made from patterned seeds), used as a test key"
+targetRules = ["generic-api-key"]
+paths = ['''(^|/)sdk/typescript/scripts/pack\-check/server\.ts$''']
+
+[[allowlists]]
+description = "One of app-keys.json's fixture app keys (made from patterned seeds), used as a test key"
+targetRules = ["generic-api-key"]
+paths = ['''(^|/)sdk/typescript/scripts/pack\-check/server\-v2\.ts$''']
+
+[[allowlists]]
+description = "The SDK's test module's fake key (an app-keys.json fixture) and the wire fixture's whsec_"
+targetRules = ["generic-api-key"]
+paths = ['''(^|/)sdk/typescript/src/testing\.ts$''']
+
+[[allowlists]]
+description = "One of app-keys.json's fixture app keys (made from patterned seeds), used as a test key"
+targetRules = ["generic-api-key"]
+paths = ['''(^|/)sdk/typescript/test/access\.test\.ts$''']
+
+[[allowlists]]
+description = "One of app-keys.json's fixture app keys (made from patterned seeds), used as a test key"
+targetRules = ["generic-api-key"]
+paths = ['''(^|/)sdk/typescript/test/attach\.test\.ts$''']
+
+[[allowlists]]
+description = "One of app-keys.json's fixture app keys (made from patterned seeds), used as a test key"
+targetRules = ["generic-api-key"]
+paths = ['''(^|/)sdk/typescript/test/clientrequests\.test\.ts$''']
+
+[[allowlists]]
+description = "One of app-keys.json's fixture app keys (made from patterned seeds), used as a test key; mcp-events-wire.json's fixture webhook secret (whsec_), with an example.com or agent.example URL"
+targetRules = ["generic-api-key"]
+paths = ['''(^|/)sdk/typescript/test/context\.test\.ts$''']
+
+[[allowlists]]
+description = "One of app-keys.json's fixture app keys (made from patterned seeds), used as a test key"
+targetRules = ["generic-api-key"]
+paths = ['''(^|/)sdk/typescript/test/disabled\.test\.ts$''']
+
+[[allowlists]]
+description = "One of app-keys.json's fixture app keys (made from patterned seeds), used as a test key"
+targetRules = ["generic-api-key"]
+paths = ['''(^|/)sdk/typescript/test/emit\.test\.ts$''']
+
+[[allowlists]]
+description = "One of app-keys.json's fixture app keys (made from patterned seeds), used as a test key"
+targetRules = ["generic-api-key"]
+paths = ['''(^|/)sdk/typescript/test/identity\.test\.ts$''']
+
+[[allowlists]]
+description = "mcp-events-wire.json's fixture webhook secret (whsec_), with an example.com or agent.example URL"
+targetRules = ["generic-api-key"]
+paths = ['''(^|/)sdk/typescript/test/interop\.test\.ts$''']
+
+[[allowlists]]
+description = "One of app-keys.json's fixture app keys (made from patterned seeds), used as a test key"
+targetRules = ["generic-api-key"]
+paths = ['''(^|/)sdk/typescript/test/push\.test\.ts$''']
+
+[[allowlists]]
+description = "One of app-keys.json's fixture app keys (made from patterned seeds), used as a test key, as the canary"
+targetRules = ["generic-api-key"]
+paths = ['''(^|/)sdk/typescript/test/secrets\.test\.ts$''']
+
+[[allowlists]]
+description = "One of app-keys.json's fixture app keys (made from patterned seeds), used as a test key"
+targetRules = ["generic-api-key"]
+paths = ['''(^|/)sdk/typescript/test/stdio\.test\.ts$''']
+
+[[allowlists]]
+description = "One of app-keys.json's fixture app keys (made from patterned seeds), used as a test key"
+targetRules = ["generic-api-key"]
+paths = ['''(^|/)sdk/typescript/test/subscribing\.test\.ts$''']
+
+[[allowlists]]
+description = "One of app-keys.json's fixture app keys (made from patterned seeds), used as a test key; mcp-events-wire.json's fixture webhook secret (whsec_), with an example.com or agent.example URL"
+targetRules = ["generic-api-key"]
+paths = ['''(^|/)sdk/typescript/test/testing\.test\.ts$''']
+
+[[allowlists]]
+description = "One of app-keys.json's fixture app keys (made from patterned seeds), used as a test key"
+targetRules = ["generic-api-key"]
+paths = ['''(^|/)sdk/typescript/test/tools\.test\.ts$''']
+
+[[allowlists]]
+description = "One of app-keys.json's fixture app keys (made from patterned seeds), used as a test key; mcp-events-wire.json's fixture webhook secret (whsec_), with an example.com or agent.example URL"
+targetRules = ["generic-api-key"]
+paths = ['''(^|/)sdk/typescript/test/vouchers\.test\.ts$''']
+
+[[allowlists]]
+description = "One of app-keys.json's fixture app keys (made from patterned seeds), used as a test key"
+targetRules = ["generic-api-key"]
+paths = ['''(^|/)sdk/typescript/test/watch\.test\.ts$''']
+
+[[allowlists]]
+description = "Made-up wrong development sign-in tokens the test checks are refused"
+targetRules = ["generic-api-key"]
+paths = ['''(^|/)internal/auth/dev_test\.go$''']
