@@ -15,9 +15,9 @@
     "dry-run": "tsc -p tsconfig.json && node dist/src/cli.js --harness fake --target fake --scenarios S1-S9 --out-root \"${TMPDIR:-/tmp}/wakebench-dry\""
   },
   "dependencies": {
-    "@anthropic-ai/sdk": "1.6.0",
-    "@mastra/core": "1.81.0",
-    "@mastra/mcp": "2.7.0",
+    "@anthropic-ai/sdk": "1.12.0",
+    "@mastra/core": "1.85.0",
+    "@mastra/mcp": "2.10.0",
     "@modelcontextprotocol/client": "^2.4.0",
     "@modelcontextprotocol/node": "^2.1.2",
     "@modelcontextprotocol/server": "^2.4.0",
@@ -29,6 +29,6 @@
   "devDependencies": {
     "@types/node": "^26.6.6",
     "@types/pg": "^8.23.1",
-    "typescript": "^5.9.3"
+    "typescript": "^7.0.2"
   }
 }
