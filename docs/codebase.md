@@ -42,7 +42,7 @@ These are published, with their own tests and releases, in [wakeshift/connectors
 
 The SDKs, plugins and apps in this tree (`pkg/wakeshift/`, `sdk/`, `plugins/`, `apps/`) are here because the server builds and tests against them: its tests run the SDKs and an app against a real server, and it serves the plugins' files. Each is published from here to a repository of its own, with its own releases: install them from there (the repositories below), not from this tree.
 
-`pkg/wakeshift/` is the Go SDK, published as [wakeshift-go](https://github.com/wakeshift/wakeshift-go); the TypeScript and Python SDKs are [wakeshift-node](https://github.com/wakeshift/wakeshift-node) and [wakeshift-python](https://github.com/wakeshift/wakeshift-python). The three share golden files for the wire format and the text they add to tool results, so they answer the same bytes. `apps/agentkit/` and `apps/email/` are what the hosted service's own apps share with the server (an agent's sessions and waits; the email layout).
+`pkg/wakeshift/` is the Go SDK, published as [wakeshift-go](https://github.com/wakeshift/wakeshift-go); the TypeScript and Python SDKs are [wakeshift-node](https://github.com/wakeshift/wakeshift-node) and [wakeshift-python](https://github.com/wakeshift/wakeshift-python). The three share golden files for the wire format and the text they add to tool results, so they answer the same bytes. `apps/agentkit/` and `apps/email/` are what the hosted service's own apps share with the server (an agent's sessions and waits; the email layout). `apps/try/` is Webhooks, which docker-compose.yml runs behind the profile `webhooks` so you can wake an agent with one POST ([self-hosting.md](self-hosting.md#webhooks)).
 
 ## Tests
 

@@ -255,3 +255,13 @@ targetRules = ["generic-api-key"]
 condition = "AND"
 regexes = ['''^Ed25519PrivateKey$''']
 paths = ['''(^|/)sdk/python/src/wakeshift/_key\.py$''']
+
+# Not secrets: Webhooks' (apps/try) test fixtures, a made-up Stripe signing
+# secret and a made-up Linear one (base64 of "BooOhEsKjclawvisorTest"),
+# pasted into the page the way a user pastes theirs. No service issued them.
+[[allowlists]]
+description = "Webhooks' made-up Stripe and Linear signing secrets in its tests"
+targetRules = ["webhook-signing-secret", "generic-api-key"]
+condition = "AND"
+regexes = ['''^(?:whsec_5f8a1c2e9b7d4a6f0e3c8b1a2d4f6e8c|lin_wh_Qm9vT2hFc0tqY2xhd3Zpc29yVGVzdA)$''']
+paths = ['''(^|/)apps/try/test/(unit|e2e)\.test\.ts$''']

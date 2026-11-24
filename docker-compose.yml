@@ -84,6 +84,64 @@ services:
       # sign up").
       WAKESHIFT_ALLOWED_SIGNUPS: ${WAKESHIFT_ALLOWED_SIGNUPS:-}
       WAKESHIFT_OPEN_SIGNUPS: ${WAKESHIFT_OPEN_SIGNUPS:-}
+      # Installs for Codex and the other agents that need one (optional).
+      # The image carries no connector, so out of the box their install
+      # offers say it isn't available. Build it into bin/connector/
+      # (docs/self-hosting.md, "The connector and installs"), uncomment the
+      # volume below, and start with
+      #   WAKESHIFT_CONNECTOR_DIR=/connector docker compose up --build
+      # Or set WAKESHIFT_INSTALLER_URL to installers built for this server.
+      WAKESHIFT_CONNECTOR_DIR: ${WAKESHIFT_CONNECTOR_DIR:-}
+      WAKESHIFT_INSTALLER_URL: ${WAKESHIFT_INSTALLER_URL:-}
+    # volumes:
+    #   - ./bin/connector:/connector:ro
+
+  # Webhooks (apps/try), only with the profile webhooks: a page that gives
+  # you a webhook URL and an MCP URL for your agent; ask the agent to watch,
+  # and each POST to the webhook URL wakes it. Set up once, then start:
+  #
+  #   sh deploy/webhooks-env.sh      # writes .env: keys and secrets
+  #   docker compose --profile webhooks up --build
+  #
+  # Then open http://localhost:8380. Plain `docker compose up` leaves it out.
+  webhooks:
+    profiles: [webhooks]
+    build:
+      context: .
+      target: webhooks
+    depends_on:
+      postgres:
+        condition: service_healthy
+      server:
+        condition: service_started
+    ports:
+      - "127.0.0.1:8380:8380"
+    environment:
+      # The app's own database and its two roles (deploy/postgres-init.sql):
+      # the owner migrates at startup, then the app runs as a role that only
+      # reads and writes.
+      TRY_DATABASE_URL: postgres://webhooks_app:webhooks_app@postgres:5432/webhooks?sslmode=disable
+      TRY_MIGRATE_DATABASE_URL: postgres://webhooks:webhooks@postgres:5432/webhooks?sslmode=disable
+      # The server's public URL (its WAKESHIFT_PUBLIC_URL), which the app's
+      # signed requests are addressed to; always set here, since unset the
+      # app talks to Wakeshift's hosted service. Inside compose the server is
+      # at http://server:8370, so requests go there (TRY_CORE_ADDR).
+      WAKESHIFT_CORE: http://localhost:8370
+      TRY_CORE_ADDR: http://server:8370
+      # The app's key, registered with the server in WAKESHIFT_APPS, and the
+      # secret that signs its links: deploy/webhooks-env.sh writes both to
+      # .env. Never a fixed value: unset, the app exits saying so. (Not
+      # ${…:?}, which docker compose checks even without the profile, so
+      # plain `docker compose up` would fail too.)
+      WAKESHIFT_KEY: ${WEBHOOKS_KEY:-}
+      TRY_SECRET: ${WEBHOOKS_SECRET:-}
+      PUBLIC_URL: http://localhost:8380
+      # Inside the container it listens on all of its interfaces, which
+      # Docker's port publishing needs; the port is published on 127.0.0.1
+      # only (above), so posts reach it straight from this machine, through
+      # no proxy.
+      PORT: "8380"
+      TRY_PROXY_HOPS: "0"
 
 volumes:
   pgdata:

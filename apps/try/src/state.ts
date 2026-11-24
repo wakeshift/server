@@ -1,0 +1,608 @@
+// What the server keeps per webhook, in Postgres so it survives restarts and
+// every instance sees the same: when the link was last used, the posts
+// counted against its limits, the recent activity the page shows live (and
+// the posts in full for recent_posts), who is watching, the checked URL the
+// user last picked, and the MCP sessions. A post handled by one instance
+// reaches pages connected to another by NOTIFY on the webhook's channel.
+//
+// Kept as the privacy policy says (legal.ts), by sweep(): a webhook's
+// activity and posts until a day without use with no one watching (or 7
+// days without use); when it was last used and its checked URL until the
+// link expires (7 days without use); a watcher until it unwatches, its
+// subscription ends (7 days) or the link expires; counts until their
+// window ends (the per-minute counts of posts the live view didn't list, an
+// hour); MCP sessions until they're idle for as long as a link lives.
+// When a link expires, Wakeshift is asked to forget its webhook (the app's
+// user there, with the conversations that watched it): forgetExpired, until
+// Wakeshift says it's done.
+
+import type { Check } from "./links.js";
+import type { Db } from "./db.js";
+
+const HOUR = 3600_000;
+const DAY = 24 * HOUR;
+const RING = 50;
+const BODIES = 10;
+/** How often a link's last use is written: it only has to be right to the day. */
+const TOUCH_EVERY = 5 * 60_000;
+/** forgetExpired's backoff after a failure: a minute, doubling each time, at most 6 hours. */
+const FORGET_BACKOFF_MIN = 60_000;
+export const FORGET_BACKOFF_MAX = 6 * HOUR;
+/** How many forget calls forgetExpired has in flight at once. */
+const FORGET_CONCURRENCY = 8;
+
+/** One line of a webhook's live view. Every string in it may come from whoever posted. */
+export interface Activity {
+  seq: number;
+  at: string;
+  kind: "post" | "refused" | "limited" | "failed" | "watch" | "unwatch" | "skipped" | "rotated";
+  method?: string;
+  contentType?: string;
+  size?: number;
+  /** The event's text, as the agent reads it (cut for the page). */
+  text?: string;
+  /** The start of what was posted (the text doesn't repeat it). */
+  preview?: string;
+  /** Which of the webhook's URLs it came to. */
+  check?: Check;
+  /** Conversations the publish woke (or will). */
+  matched?: number;
+  duplicate?: boolean;
+  /** Why it was refused, or what failed. */
+  reason?: string;
+  /**
+   * The conversation that watched or stopped, by a public label (never its
+   * session key, which acts as the conversation), its client and the
+   * harness Wakeshift recognized.
+   */
+  conversation?: string;
+  client?: string;
+  harness?: string;
+  /**
+   * A skipped line: how many refused or rate-limited posts in the minute
+   * starting at minute got no line of their own, and the statuses they
+   * were answered with.
+   */
+  count?: number;
+  codes?: number[];
+  minute?: string;
+}
+
+/** A post as the agent can read it in full. Its text and data come from whoever posted. */
+export interface Post {
+  seq: number;
+  at: string;
+  text: string;
+  data: unknown;
+}
+
+export interface Watcher {
+  /** A public label (conversationLabel in server.ts), never the session key. */
+  conversation: string;
+  client: string;
+  harness?: string;
+  since: string;
+}
+
+export interface Limits {
+  perHour: number;
+  perDay: number;
+  /** Across every webhook: protects Wakeshift from someone with many links. */
+  globalPerHour: number;
+  /** Posts from one address (take's addr) an hour, across every webhook, so one sender can't use up the global hour. Unset: none. */
+  addressPerHour?: number;
+  /**
+   * How much of the global hour posts to webhooks no agent has used in the
+   * last day (no watching conversation, no MCP session) may use: the rest
+   * is kept for webhooks agents use. Unset: all of it.
+   */
+  globalIdlePerHour?: number;
+}
+
+/** Which limit a post is over (take). */
+export type Over = "day" | "hour" | "global" | "address";
+const overCodes: Record<number, Over> = { 1: "day", 2: "hour", 3: "global", 4: "address" };
+
+/** A checked webhook URL the user picked on the page (or that a service posted to). */
+export interface Checked {
+  check: Exclude<Check, "open">;
+  url: string;
+}
+
+/** An MCP session: what its initialize said, and the label of the conversation it watched as. */
+export interface McpSession {
+  id: string;
+  hook: string;
+  client: { name: string; version: string; [k: string]: unknown };
+  capabilities: Record<string, unknown>;
+  protocolVersion: string;
+  watchedAs?: string;
+}
+
+// The live view's NOTIFY payload: "<seq> <activity JSON>", or "<seq>" alone
+// when the activity is too big for a notification (it's read back instead).
+const MAX_NOTIFY = 7000;
+
+const channelOf = (hook: string) => "try_" + hook;
+// Adds a line to a webhook's live view, keeps its last RING, and notifies
+// the instances listening: $1 hook, $2 at, $3 the line's JSON, $4 the
+// channel, $5 whether the line fits in the notification.
+const ADD_LINE = `WITH ins AS (INSERT INTO activity (hook, at, body) VALUES ($1, $2, $3) RETURNING seq),
+      del AS (DELETE FROM activity WHERE hook = $1 AND seq <= (SELECT seq FROM activity WHERE hook = $1 ORDER BY seq DESC OFFSET ${RING - 1} LIMIT 1))
+ SELECT seq, pg_notify($4, CASE WHEN $5::boolean THEN seq || ' ' || $3 ELSE seq::text END) FROM ins`;
+// Text columns can't hold NUL.
+const clean = (s: string, n: number) => s.replace(/\0/g, "").slice(0, n);
+const hourEnd = (t: number) => Math.floor(t / HOUR) * HOUR + HOUR;
+const dayEnd = (t: number) => Math.floor(t / DAY) * DAY + DAY;
+const secondsUntil = (end: number, t: number) => Math.max(1, Math.ceil((end - t) / 1000));
+// A line as the page gets it: never a session key, even from a line written
+// before lines named conversations by label (002_conversation_labels.sql
+// removed those).
+const withoutKey = (a: Activity & { session?: unknown }): Activity => {
+  delete a.session;
+  return a;
+};
+
+export class State {
+  // When this process last wrote each link's use, so it writes at most every TOUCH_EVERY.
+  private readonly touched = new Map<string, number>();
+
+  constructor(
+    private readonly db: Db,
+    readonly limits: Limits,
+    private readonly now: () => number = Date.now,
+  ) {
+    // Notifications missed while the LISTEN connection was down: send each
+    // listener the recent activity again (the page drops what it has).
+    db.onReconnect = (channels) => {
+      for (const ch of channels) {
+        const hook = ch.slice(4);
+        this.recent(hook)
+          .then((list) => {
+            for (const a of list) this.dispatch(hook, a);
+          })
+          .catch(() => {});
+      }
+    };
+  }
+
+  /** When the link was last used (0: never, as far as anyone recorded). */
+  async lastUse(id: string): Promise<number> {
+    const r = await this.db.query("SELECT last_use FROM hooks WHERE hook = $1", [id]);
+    // No row: never used, or swept (its link expired; it may be being
+    // forgotten), whatever this process wrote before; and touch must ask
+    // the database again (it refuses a webhook being forgotten).
+    if (!r.rows[0]) {
+      this.touched.delete(id);
+      return 0;
+    }
+    return Math.max((r.rows[0].last_use as Date).getTime(), this.touched.get(id) ?? 0);
+  }
+
+  /**
+   * Writes the link's use (at most every TOUCH_EVERY). False if its link
+   * has expired after all (a request that found it alive just before the
+   * sweep): it's being forgotten, or was in the last day, so it stays
+   * expired, and the request should say so.
+   */
+  async touch(id: string): Promise<boolean> {
+    const t = this.now();
+    if (t - (this.touched.get(id) ?? 0) < TOUCH_EVERY) {
+      // Written lately: only check it isn't being forgotten (a read, not a write).
+      const q = await this.db.query("SELECT 1 FROM forgets WHERE hook = $1", [id]);
+      if (!q.rowCount) return true;
+      this.touched.delete(id);
+      return false;
+    }
+    const r = await this.db.query(
+      `INSERT INTO hooks (hook, last_use) SELECT $1, $2 WHERE NOT EXISTS (SELECT 1 FROM forgets WHERE hook = $1)
+       ON CONFLICT (hook) DO UPDATE SET last_use = greatest(hooks.last_use, excluded.last_use)`,
+      [id, new Date(t)],
+    );
+    if (!r.rowCount) return false;
+    this.touched.set(id, t);
+    return true;
+  }
+
+  /**
+   * Counts a post against the limits of one of the webhook's URLs (each
+   * check has its own, so whoever has the open URL can't use up the checked
+   * one's), its sender's address (addr: a key for the address, as
+   * server.ts makes them; none if undefined), and the global hour, in fixed
+   * windows (the hour, the UTC day). Returns 0 if it's allowed, else how
+   * many seconds until the next one would be. Call it only for posts that
+   * passed the URL's check; pass the same time and addr to untake.
+   */
+  async take(id: string, check: Check, at = this.now(), addr?: string): Promise<number> {
+    return (await this.takePost(id, check, at, addr)).wait;
+  }
+
+  /** take, saying which limit a refused post is over. */
+  async takePost(id: string, check: Check, at = this.now(), addr?: string): Promise<{ wait: number; over?: Over }> {
+    const h = hourEnd(at);
+    const d = dayEnd(at);
+    const r = await this.db.query("SELECT take_post($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13) AS over", [
+      id,
+      `${id}/${check}/d`,
+      `${id}/${check}/h`,
+      addr === undefined || this.limits.addressPerHour === undefined ? null : addr,
+      "global/h",
+      new Date(d),
+      new Date(h),
+      this.limits.perDay,
+      this.limits.perHour,
+      this.limits.addressPerHour ?? 0,
+      this.limits.globalPerHour,
+      this.limits.globalIdlePerHour ?? this.limits.globalPerHour,
+      new Date(at - DAY),
+    ]);
+    const over = overCodes[r.rows[0].over as number];
+    if (!over) return { wait: 0 };
+    return { wait: secondsUntil(over === "day" ? d : h, at), over };
+  }
+
+  /**
+   * Gives back what take counted at the time given, for a post Wakeshift
+   * didn't take. One row per statement, in take's order (day, hour,
+   * address, global): one statement over the rows would lock them in scan
+   * order, and could deadlock with a take.
+   */
+  async untake(id: string, check: Check, at: number, addr?: string): Promise<void> {
+    const h = new Date(hourEnd(at));
+    const d = new Date(dayEnd(at));
+    const rows: [string, Date][] = [
+      [`${id}/${check}/d`, d],
+      [`${id}/${check}/h`, h],
+      ...(addr === undefined || this.limits.addressPerHour === undefined ? [] : ([[addr, h]] as [string, Date][])),
+      ["global/h", h],
+    ];
+    for (const [key, until] of rows) {
+      await this.db.query("UPDATE counters SET n = greatest(n - 1, 0) WHERE key = $1 AND until = $2", [key, until]);
+    }
+  }
+
+  /** Counts one against an hourly limit for key (new links per address). Returns 0, or seconds to wait. */
+  async takeHourly(key: string, limit: number, at = this.now()): Promise<number> {
+    const h = hourEnd(at);
+    const r = await this.db.query(
+      "INSERT INTO counters (key, until, n) VALUES ($1, $2, 1) ON CONFLICT (key, until) DO UPDATE SET n = counters.n + 1 WHERE counters.n < $3 RETURNING n",
+      [key, new Date(h), limit],
+    );
+    return r.rowCount ? 0 : secondsUntil(h, at);
+  }
+
+  /** The open URL's current generation (links.ts): 0 until the user first gets a new one. */
+  async openGen(id: string): Promise<number> {
+    const r = await this.db.query("SELECT open_gen FROM hooks WHERE hook = $1", [id]);
+    return r.rows[0]?.open_gen ?? 0;
+  }
+
+  /**
+   * Replaces the webhook's open URL: the next generation, from now on the
+   * only one taken. Returns it, or undefined if the link has expired (it's
+   * being forgotten).
+   */
+  async rotateOpen(id: string): Promise<number | undefined> {
+    const r = await this.db.query(
+      `INSERT INTO hooks (hook, last_use, open_gen) SELECT $1, $2, 1 WHERE NOT EXISTS (SELECT 1 FROM forgets WHERE hook = $1)
+       ON CONFLICT (hook) DO UPDATE SET open_gen = hooks.open_gen + 1, last_use = greatest(hooks.last_use, excluded.last_use)
+       RETURNING open_gen`,
+      [id, new Date(this.now())],
+    );
+    return r.rows[0]?.open_gen;
+  }
+
+  /** The checked URL the user last picked for the webhook, if there is one. */
+  async checked(id: string): Promise<Checked | undefined> {
+    const r = await this.db.query("SELECT checked_check, checked_url FROM hooks WHERE hook = $1", [id]);
+    const row = r.rows[0];
+    return row?.checked_url ? { check: row.checked_check, url: row.checked_url } : undefined;
+  }
+
+  async pick(id: string, c: Checked): Promise<void> {
+    await this.db.query(
+      `INSERT INTO hooks (hook, last_use, checked_check, checked_url) SELECT $1, $2, $3, $4 WHERE NOT EXISTS (SELECT 1 FROM forgets WHERE hook = $1)
+       ON CONFLICT (hook) DO UPDATE SET checked_check = excluded.checked_check, checked_url = excluded.checked_url
+       WHERE hooks.checked_url IS DISTINCT FROM excluded.checked_url`,
+      [id, new Date(this.now()), c.check, c.url],
+    );
+  }
+
+  /**
+   * Adds a line to the webhook's live view (keeping the last 50) and
+   * notifies every instance's listeners for it.
+   */
+  async record(id: string, a: Omit<Activity, "seq" | "at">): Promise<Activity> {
+    const at = new Date(this.now());
+    const body: Omit<Activity, "seq"> = { ...a, at: at.toISOString() };
+    if (body.client !== undefined) body.client = body.client.slice(0, 100);
+    if (body.harness !== undefined) body.harness = body.harness.slice(0, 40);
+    const json = JSON.stringify(body);
+    const r = await this.db.query(ADD_LINE, [id, at, json, channelOf(id), Buffer.byteLength(json) <= MAX_NOTIFY]);
+    return { ...body, seq: Number(r.rows[0].seq) };
+  }
+
+  /**
+   * Adds n refused or rate-limited posts that got no line of their own in
+   * the minute starting at minute (answered with codes) to the webhook's
+   * one line for that minute: written the first time, updated in place
+   * (the same seq) after, so every instance's count adds up in one line.
+   * Listeners get the line either way (the page replaces it by seq).
+   */
+  async skipped(id: string, minute: number, n: number, codes: number[]): Promise<Activity> {
+    const c = await this.db.pool.connect();
+    try {
+      await c.query("BEGIN");
+      // The row lock orders instances adding to the same minute.
+      const r = await c.query(
+        `INSERT INTO skipped (hook, minute, n, codes) VALUES ($1, $2, $3, $4)
+         ON CONFLICT (hook, minute) DO UPDATE SET n = skipped.n + excluded.n,
+           codes = ARRAY(SELECT DISTINCT x FROM unnest(skipped.codes || excluded.codes) x ORDER BY x)
+         RETURNING n, codes, seq`,
+        [id, new Date(minute), n, [...new Set(codes)].sort((a, b) => a - b)],
+      );
+      const row = r.rows[0];
+      const at = new Date(minute);
+      const body: Omit<Activity, "seq"> = { kind: "skipped", count: row.n, codes: row.codes, minute: at.toISOString(), at: at.toISOString() };
+      const json = JSON.stringify(body);
+      let seq: number | undefined = row.seq === null ? undefined : Number(row.seq);
+      if (seq !== undefined) {
+        const u = await c.query("UPDATE activity SET body = $3 WHERE seq = $1 AND hook = $2", [seq, id, json]);
+        // Pushed out of the last 50 since: a new line.
+        if (!u.rowCount) seq = undefined;
+        else await c.query("SELECT pg_notify($1, $2)", [channelOf(id), seq + " " + json]);
+      }
+      if (seq === undefined) {
+        const ins = await c.query(ADD_LINE, [id, at, json, channelOf(id), true]);
+        seq = Number(ins.rows[0].seq);
+        await c.query("UPDATE skipped SET seq = $3 WHERE hook = $1 AND minute = $2", [id, at, seq]);
+      }
+      await c.query("COMMIT");
+      return { ...body, seq };
+    } catch (err) {
+      await c.query("ROLLBACK").catch(() => {});
+      throw err;
+    } finally {
+      c.release();
+    }
+  }
+
+  /** Keeps a post's text and data for the recent_posts tool (the last 10). */
+  async keep(id: string, p: Post): Promise<void> {
+    await this.db.query(
+      `WITH ins AS (INSERT INTO posts (seq, hook, at, body) VALUES ($1, $2, $3, $4)),
+            del AS (DELETE FROM posts WHERE hook = $2 AND seq <= (SELECT seq FROM posts WHERE hook = $2 ORDER BY seq DESC OFFSET ${BODIES - 1} LIMIT 1))
+       SELECT 1`,
+      [p.seq, id, new Date(p.at), JSON.stringify({ text: p.text, data: p.data })],
+    );
+  }
+
+  /** The last few posts in full, newest first. */
+  async posts(id: string, limit: number): Promise<Post[]> {
+    const r = await this.db.query("SELECT seq, at, body FROM posts WHERE hook = $1 ORDER BY seq DESC LIMIT $2", [id, Math.min(limit, BODIES)]);
+    return r.rows.map((row) => {
+      const b = JSON.parse(row.body);
+      return { seq: Number(row.seq), at: (row.at as Date).toISOString(), text: b.text, data: b.data };
+    });
+  }
+
+  /** The live view so far, oldest first. */
+  async recent(id: string): Promise<Activity[]> {
+    const r = await this.db.query("SELECT seq, body FROM activity WHERE hook = $1 ORDER BY seq DESC LIMIT $2", [id, RING]);
+    return r.rows.reverse().map((row) => ({ ...withoutKey(JSON.parse(row.body)), seq: Number(row.seq) }));
+  }
+
+  private readonly local = new Map<string, Set<(a: Activity) => void>>();
+
+  private dispatch(hook: string, a: Activity) {
+    for (const fn of this.local.get(hook) ?? []) fn(a);
+  }
+
+  /**
+   * Calls fn with each new line of the webhook's live view, from any
+   * instance. Resolves once it's listening: read recent() after it, so
+   * nothing falls between the two.
+   */
+  async listen(id: string, fn: (a: Activity) => void): Promise<() => void> {
+    let set = this.local.get(id);
+    if (!set) {
+      set = new Set();
+      this.local.set(id, set);
+    }
+    set.add(fn);
+    const off = await this.db.listen(channelOf(id), (payload) => {
+      const sp = payload.indexOf(" ");
+      if (sp > 0) {
+        try {
+          fn({ ...withoutKey(JSON.parse(payload.slice(sp + 1))), seq: Number(payload.slice(0, sp)) });
+        } catch {
+          // not ours
+        }
+        return;
+      }
+      const seq = Number(payload);
+      this.db
+        .query("SELECT body FROM activity WHERE seq = $1 AND hook = $2", [seq, id])
+        .then((r) => r.rows[0] && fn({ ...withoutKey(JSON.parse(r.rows[0].body)), seq }))
+        .catch(() => {});
+    });
+    return () => {
+      off();
+      set.delete(fn);
+      if (set.size === 0) this.local.delete(id);
+    };
+  }
+
+  async watched(id: string, w: Watcher): Promise<void> {
+    await this.db.query(
+      "INSERT INTO watchers (hook, conversation, client, harness, since) VALUES ($1, $2, $3, $4, $5) ON CONFLICT (hook, conversation) DO UPDATE SET client = excluded.client, harness = excluded.harness, since = excluded.since",
+      [id, clean(w.conversation, 40), clean(w.client, 100), w.harness ? clean(w.harness, 40) : null, new Date(w.since)],
+    );
+  }
+
+  async unwatched(id: string, conversation?: string): Promise<void> {
+    if (conversation) await this.db.query("DELETE FROM watchers WHERE hook = $1 AND conversation = $2", [id, conversation]);
+    else await this.db.query("DELETE FROM watchers WHERE hook = $1", [id]);
+  }
+
+  async watchers(id: string): Promise<Watcher[]> {
+    const r = await this.db.query("SELECT conversation, client, harness, since FROM watchers WHERE hook = $1 ORDER BY since LIMIT 50", [id]);
+    return r.rows.map((row) => ({
+      conversation: row.conversation,
+      client: row.client,
+      ...(row.harness ? { harness: row.harness } : {}),
+      since: (row.since as Date).toISOString(),
+    }));
+  }
+
+  // ── MCP sessions ──────────────────────────────────────────────────────
+
+  /** Stores a new session, keeping the webhook's newest max. */
+  async saveSession(s: McpSession, max: number): Promise<void> {
+    const t = new Date(this.now());
+    await this.db.query(
+      `WITH ins AS (INSERT INTO sessions (id, hook, client, capabilities, protocol_version, created_at, last_seen) VALUES ($1, $2, $3, $4, $5, $6, $6)),
+            del AS (DELETE FROM sessions WHERE id IN (SELECT id FROM sessions WHERE hook = $2 ORDER BY last_seen DESC OFFSET $7))
+       SELECT 1`,
+      [s.id, s.hook, JSON.stringify(s.client), JSON.stringify(s.capabilities), clean(s.protocolVersion, 40), t, max - 1],
+    );
+  }
+
+  /** A session by its ID (and marks it seen), or undefined. */
+  async session(id: string): Promise<McpSession | undefined> {
+    const t = new Date(this.now());
+    const r = await this.db.query(
+      `WITH s AS (SELECT * FROM sessions WHERE id = $1),
+            u AS (UPDATE sessions SET last_seen = $2 WHERE id = $1 AND last_seen < $2::timestamptz - interval '5 minutes')
+       SELECT * FROM s`,
+      [id, t],
+    );
+    const row = r.rows[0];
+    if (!row) return undefined;
+    return {
+      id: row.id,
+      hook: row.hook,
+      client: JSON.parse(row.client),
+      capabilities: JSON.parse(row.capabilities),
+      protocolVersion: row.protocol_version,
+      watchedAs: row.watched_as ?? undefined,
+    };
+  }
+
+  async sessionWatched(id: string, conversation: string | undefined): Promise<void> {
+    await this.db.query("UPDATE sessions SET watched_as = $2 WHERE id = $1", [id, conversation ?? null]);
+  }
+
+  async dropSession(id: string, hook: string): Promise<boolean> {
+    const r = await this.db.query("DELETE FROM sessions WHERE id = $1 AND hook = $2", [id, hook]);
+    return (r.rowCount ?? 0) > 0;
+  }
+
+  // ── Retention ─────────────────────────────────────────────────────────
+
+  /**
+   * Has Wakeshift forget the webhooks whose links expired (the sweep queues
+   * them): calls forget for each that's due, oldest first, up to limit,
+   * and returns how many it finished. One that fails is tried again after
+   * a backoff (a minute, doubling, at most FORGET_BACKOFF_MAX), however
+   * long that takes. Once queued, a webhook stays expired: its use isn't
+   * written again (touch, pick), so nothing can use it while it's being
+   * forgotten. One whose use was written as the sweep queued it (a request
+   * that found the link alive just before) is in use again, and isn't
+   * forgotten: it's queued again when it next expires.
+   */
+  async forgetExpired(forget: (hook: string) => Promise<unknown>, limit = 500): Promise<{ forgotten: number; failed: number }> {
+    const now = new Date(this.now());
+    await this.db.query("DELETE FROM forgets WHERE done_at IS NULL AND hook IN (SELECT hook FROM hooks)");
+    // Claimed for a while, so another instance's pass doesn't call it too.
+    const r = await this.db.query(
+      `UPDATE forgets SET next_try = $1::timestamptz + interval '10 minutes'
+       WHERE hook IN (SELECT f.hook FROM forgets f WHERE f.done_at IS NULL AND f.next_try <= $1 AND NOT EXISTS (SELECT 1 FROM hooks h WHERE h.hook = f.hook)
+                      ORDER BY f.next_try LIMIT $2 FOR UPDATE OF f SKIP LOCKED)
+       RETURNING hook, attempts`,
+      [now, limit],
+    );
+    let forgotten = 0;
+    let failed = 0;
+    const queue = r.rows as { hook: string; attempts: number }[];
+    const worker = async () => {
+      for (let row = queue.shift(); row; row = queue.shift()) {
+        try {
+          await forget(row.hook);
+          // Kept a day as done, so the link can't come back in use meanwhile (touch).
+          await this.db.query("UPDATE forgets SET done_at = $2 WHERE hook = $1", [row.hook, new Date(this.now())]);
+          forgotten++;
+        } catch {
+          failed++;
+          const wait = Math.min(FORGET_BACKOFF_MIN * 2 ** Math.min(row.attempts, 20), FORGET_BACKOFF_MAX);
+          await this.db
+            .query("UPDATE forgets SET attempts = attempts + 1, next_try = $2 WHERE hook = $1", [row.hook, new Date(this.now() + wait)])
+            .catch(() => {}); // the claim runs out instead: tried again in 10 minutes
+        }
+      }
+    };
+    await Promise.all(Array.from({ length: FORGET_CONCURRENCY }, worker));
+    return { forgotten, failed };
+  }
+
+  /**
+   * Forgets what the privacy policy says goes: activity and posts of
+   * webhooks idle for over a day with no one watching, or for longer than
+   * keepUse (how long a link lives unused); everything else about a webhook
+   * once its link has expired; counts whose window has ended; sessions idle
+   * for sessionIdle. One instance at a time does it.
+   */
+  async sweep(keepUse: number, sessionIdle: number): Promise<void> {
+    const t = this.now();
+    for (const [id, at] of this.touched) if (t - at >= TOUCH_EVERY) this.touched.delete(id);
+    const c = await this.db.pool.connect();
+    try {
+      await c.query("BEGIN");
+      const got = await c.query("SELECT pg_try_advisory_xact_lock(7310072) AS ok");
+      if (!got.rows[0].ok) return void (await c.query("ROLLBACK"));
+      const now = new Date(t);
+      const dayAgo = new Date(t - DAY);
+      const expired = new Date(t - keepUse);
+      // A watch is a subscription that lasts as long as a link lives
+      // (keepUse): a conversation that went away without unwatching stops
+      // counting as watching once its subscription has ended.
+      await c.query("DELETE FROM watchers WHERE since < $1", [expired]);
+      await c.query(
+        `WITH last AS (
+           SELECT hook, max(t) AS t FROM (
+             SELECT hook, last_use AS t FROM hooks
+             UNION ALL SELECT hook, max(at) FROM activity GROUP BY hook
+             UNION ALL SELECT hook, max(at) FROM posts GROUP BY hook
+           ) u GROUP BY hook
+         ),
+         idle AS (
+           SELECT hook FROM last l WHERE l.t < $1 AND NOT EXISTS (SELECT 1 FROM watchers w WHERE w.hook = l.hook)
+           UNION SELECT hook FROM last WHERE t < $2
+         ),
+         a AS (DELETE FROM activity WHERE hook IN (SELECT hook FROM idle)),
+         p AS (DELETE FROM posts WHERE hook IN (SELECT hook FROM idle))
+         SELECT 1`,
+        [dayAgo, expired],
+      );
+      await c.query("DELETE FROM watchers WHERE hook IN (SELECT hook FROM hooks WHERE last_use < $1)", [expired]);
+      // The link has expired: Wakeshift forgets its webhook too, durably
+      // (queued in this transaction, done by forgetExpired).
+      await c.query(
+        `WITH gone AS (DELETE FROM hooks WHERE last_use < $1 RETURNING hook)
+         INSERT INTO forgets (hook, expired_at, next_try) SELECT hook, $2, $2 FROM gone
+         ON CONFLICT (hook) DO UPDATE SET expired_at = excluded.expired_at, next_try = excluded.next_try, attempts = 0, done_at = NULL`,
+        [expired, now],
+      );
+      await c.query("DELETE FROM forgets WHERE done_at < $1", [dayAgo]);
+      await c.query("DELETE FROM counters WHERE until <= $1", [now]);
+      await c.query("DELETE FROM skipped WHERE minute < $1", [new Date(t - HOUR)]);
+      await c.query("DELETE FROM sessions WHERE last_seen < $1", [new Date(t - sessionIdle)]);
+      await c.query("COMMIT");
+    } catch (err) {
+      await c.query("ROLLBACK").catch(() => {});
+      throw err;
+    } finally {
+      c.release();
+    }
+  }
+}

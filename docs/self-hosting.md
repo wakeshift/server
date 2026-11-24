@@ -4,7 +4,7 @@ The server is one Go binary with the console built in, and a Postgres database. 
 
 Run the container image, `ghcr.io/wakeshift/server:<version>`, built and signed for each release tag (`v*`). Until you pick a release, `docker compose up --build` or `make image` builds it from this repository. The image listens on `:8370` and also carries `/appkey`. A plain `go build ./cmd/wakeshift` gives a server with an empty console: `make build` builds the console first and embeds it.
 
-[docker-compose.yml](../docker-compose.yml) is a working example for one machine, with everything bound to loopback; the [README](../README.md#run-it) walks through it. `make gate` runs the release gate: a fresh server in compose, a new app, and an event delivered on push to an MCP Events client.
+[docker-compose.yml](../docker-compose.yml) is a working example for one machine, with everything bound to loopback; the [README](../README.md#run-it) walks through it. `make gate` runs the release gate: a fresh server in compose, a new app, and an event delivered on push to an MCP Events client. Its profile `webhooks` adds Webhooks, a webhook URL that wakes your agent ([below](#webhooks)); `make gate-webhooks` runs the gate with it too.
 
 ## Required settings
 
@@ -28,6 +28,8 @@ CREATE DATABASE wakeshift OWNER wakeshift;
 ```
 
 Set `WAKESHIFT_MIGRATE_DATABASE_URL` to the owner's URL and `DATABASE_URL` to the server's role, as [docker-compose.yml](../docker-compose.yml) and [deploy/postgres-init.sql](../deploy/postgres-init.sql) do. At each start the owner migrates, then grants the server's role what it needs: reads and writes on the tables, but not altering them, and neither updating nor deleting the audit log. The server refuses to start if its own role owns a table or can become the owner. Without `WAKESHIFT_MIGRATE_DATABASE_URL`, the server runs as the owner, which works but can alter the tables, including the audit log's protections.
+
+To use a Postgres 17 you already run with `make run`, instead of the one in Docker, create the roles above and skip `make db`: `make -o db run DEV_DATABASE_URL='postgres://wakeshift_server:…@localhost:5432/wakeshift' DEV_MIGRATE_DATABASE_URL='postgres://wakeshift:…@localhost:5432/wakeshift'`.
 
 Finished deliveries and events are deleted after 30 days. Back up the database as you would any other; it holds sealed secrets that only `WAKESHIFT_SECRET_KEY` opens, so back up the key separately.
 
@@ -69,8 +71,8 @@ Everything published defaults to the hosted service, `https://app.wakeshift.ai`.
 | What | How |
 | --- | --- |
 | The SDKs | `WAKESHIFT_CORE=https://wakeshift.example.com` in the MCP server's environment, or the `core` option. |
-| `wakeshift-cli` | `--origin https://wakeshift.example.com`, or `WAKESHIFT_CORE`. |
-| The connector | Install offers from your server run `curl -fsSL https://wakeshift.example.com/install/<harness>.sh \| sh`, which trusts only your server, once it serves the connector (below). By hand: `wakeshift install --harness <harness> --issuer https://wakeshift.example.com`. |
+| `@wakeshift/cli` | `npx @wakeshift/cli init --origin https://wakeshift.example.com`, or `WAKESHIFT_CORE`. |
+| The connector | Install offers from your server run `curl -fsSL https://wakeshift.example.com/install/<harness>.sh \| sh`, which trusts only your server, once it serves the connector (below). By hand: `wakeshift install --harness <harness> --issuer https://wakeshift.example.com`, with the binary you built for your platform (`bin/connector/wakeshift-<os>-<arch>`, below). The connector binary is the same for every server; the plugin's `wakeshift.env` sets which server it trusts. |
 | Claude Code, Codex, Copilot CLI plugins | Each plugin trusts the server its marketplace was rendered for, never a setting. Your server's offers use the installer above instead, unless `WAKESHIFT_AGENT_PLUGINS` names a marketplace rendered for your server (`owner/repo`, or an absolute path; below). |
 | Antigravity CLI plugin | The installer, unless `WAKESHIFT_ANTIGRAVITY_PLUGIN` names a plugin rendered for your server (a GitHub URL or an absolute path). |
 | opencode, pi | Their npm packages take an `issuers` option in their own settings (for opencode, `["@wakeshift/opencode@<version>", { "issuers": ["https://wakeshift.example.com"] }]` in `opencode.json`). Your server's offers use the installer unless `WAKESHIFT_OPENCODE_PLUGIN` or `WAKESHIFT_PI_PLUGIN` names a version or dist-tag of a package that trusts it. |
@@ -82,7 +84,7 @@ Everything published defaults to the hosted service, `https://app.wakeshift.ai`.
 
 The image carries no connector binaries, so out of the box `/download/` serves nothing, `/install/<harness>.sh` serves a script that only says the connector isn't available, and only the agents that need no install are woken: Claude Code through its Monitor, Cursor, Copilot CLI and Antigravity CLI through their background commands, and MCP Events clients. To serve installs, either:
 
-- **Build the connector** for each platform into a directory, such as `bin/connector/` (`bin/` is gitignored), and point `WAKESHIFT_CONNECTOR_DIR` at it:
+- **Build the connector** with Go 1.27 for each platform into a directory, such as `bin/connector/` (`bin/` is gitignored), and point `WAKESHIFT_CONNECTOR_DIR` at it:
 
   ```sh
   for p in darwin/arm64 darwin/amd64 linux/arm64 linux/amd64; do
@@ -90,6 +92,8 @@ The image carries no connector binaries, so out of the box `/download/` serves n
   done
   WAKESHIFT_CONNECTOR_DIR=$PWD/bin/connector make run
   ```
+
+  With compose, uncomment the `./bin/connector` volume in [docker-compose.yml](../docker-compose.yml) and start with `WAKESHIFT_CONNECTOR_DIR=/connector docker compose up --build`.
 
   The server then serves those binaries, and install scripts that pin your `WAKESHIFT_PUBLIC_URL` as the only issuer. OpenClaw's script also needs its plugin packed into the same directory; its npm package (`WAKESHIFT_OPENCLAW_PLUGIN`) doesn't.
 - **Or set `WAKESHIFT_INSTALLER_URL`** to a release of the installers built for your server (https, no query). The installer releases published at github.com/wakeshift/connectors are built for the hosted service and trust only it, so don't point a self-hosted server at them.
@@ -100,7 +104,7 @@ The image carries no connector binaries, so out of the box `/download/` serves n
 go run ./cmd/wakeshift-agent-plugins -dir <your clone of wakeshift/agent-plugins> -issuer https://wakeshift.example.com
 ```
 
-Push the result to a repository of your own and set `WAKESHIFT_AGENT_PLUGINS=<owner>/<repo>`. With `-plugin antigravity`, it renders Antigravity CLI's plugin the same way, for `WAKESHIFT_ANTIGRAVITY_PLUGIN`.
+On one machine, add the rendered clone directly with `claude plugin marketplace add /absolute/path/to/agent-plugins`. Use `http://localhost:8370` as the issuer for the README’s Compose setup. To distribute the marketplace, push the result to a repository of your own and set `WAKESHIFT_AGENT_PLUGINS=<owner>/<repo>`. With `-plugin antigravity`, it renders Antigravity CLI's plugin the same way, for `WAKESHIFT_ANTIGRAVITY_PLUGIN`.
 
 ## Console links
 
@@ -150,6 +154,30 @@ MCP Events push (`events/stream`) is on by default only when `WAKESHIFT_PUBLIC_U
 | `WAKESHIFT_GROK_WEBHOOKS` | on only on `localhost` | `1` wakes Grok Bot through its own Automations webhook (`WAKESHIFT_GROK_*` tune it) |
 
 The admin API settings (`WAKESHIFT_ADMIN_*`) are for the hosted service's internal admin service, behind Google's Identity-Aware Proxy. Leave them unset: the API is then off. `WAKESHIFT_PROFILER` sends profiles to Google Cloud Profiler and needs a build with the `profiler` tag.
+
+## Webhooks
+
+Webhooks (`apps/try`, a Node app on the TypeScript SDK) gives each visitor a link: an MCP URL for their agent and a webhook URL, and each POST to the webhook URL wakes the conversations watching it. The [README](../README.md#try-it-with-your-agent) runs it with `docker compose --profile webhooks up --build`, after `sh deploy/webhooks-env.sh`, which writes `.env` (readable by you alone; never commit it) with a fresh `WAKESHIFT_SECRET_KEY`, a key for the app `webhooks` and its `WAKESHIFT_APPS` entry, and a secret for its links. docker compose reads `.env` by itself, but a variable set in your shell wins: if you register your own apps in `WAKESHIFT_APPS`, add the `webhooks` entry from `.env` to your list. A database volume made before the profile existed lacks Webhooks' database: create it as [deploy/postgres-init.sql](../deploy/postgres-init.sql) does, or start over with `docker compose down -v`.
+
+Its settings, in its environment (docker-compose.yml sets them for one machine):
+
+| Setting | What it is |
+| --- | --- |
+| `WAKESHIFT_KEY` | The app's key (`WEBHOOKS_KEY` in `.env`), registered with the server in `WAKESHIFT_APPS`. |
+| `WAKESHIFT_CORE` | The server's public URL (its `WAKESHIFT_PUBLIC_URL`), which the app's signed requests are addressed to. **Unset, it is `https://app.wakeshift.ai`, Wakeshift's hosted service:** the app's key and every webhook body would go there. Always set it to your server. |
+| `TRY_CORE_ADDR` | Where requests to the server go when that isn't `WAKESHIFT_CORE` (in compose, `http://server:8370`). |
+| `TRY_SECRET` | Signs every link: at least 32 random bytes (`WEBHOOKS_SECRET` in `.env`). The app refuses a shorter one. Changing it ends every link. |
+| `TRY_DATABASE_URL` | Its own Postgres database, shared by every instance. |
+| `TRY_MIGRATE_DATABASE_URL` | Optional: the database's owner, which migrates it at startup, so that `TRY_DATABASE_URL`'s role only reads and writes (compose's two roles are in deploy/postgres-init.sql). Unset, `TRY_DATABASE_URL`'s role migrates. |
+| `PUBLIC_URL` | Its public URL (default `http://localhost:$PORT`): the links, webhook URLs and MCP URLs it hands out. |
+| `PORT`, `TRY_HOST` | Where it listens: port 8380, on every interface unless `TRY_HOST` names one (`127.0.0.1` for this machine only). Compose listens on every interface inside the container and publishes the port on `127.0.0.1` only. |
+| `TRY_PROXY_HOPS` | How many proxies in front append to `X-Forwarded-For` (default 0: the connection's address). Posts and new links are limited per client address, so set it exactly. Left at 0 behind a proxy, every visitor shares the proxy's address and its limits. Set above 0 while the port is also reachable directly, anyone can choose their address with a forged `X-Forwarded-For`. |
+| `TRY_PER_HOUR`, `TRY_PER_DAY`, `TRY_GLOBAL_PER_HOUR`, `TRY_ADDRESS_PER_HOUR`, `TRY_LINKS_PER_HOUR` | Limits: posts an hour and a day per webhook URL (60, 500), posts an hour across all webhooks (20,000), posts an hour from one address (1,000), new links an hour per address (30). |
+| `WAKESHIFT_POSTHOG_KEY`, `WAKESHIFT_POSTHOG_HOST` | Optional page analytics with PostHog. Unset (the default), it loads none. |
+
+It serves no terms or privacy policy of its own: if you offer it to others, link yours from your own site. Anyone with a link can read that webhook's posts, and anyone with a webhook URL can post to it.
+
+Link codes and webhook tokens are in URL paths: `/l/…` (a link's page), `/t/…` (its MCP URL) and `/in/…` (its webhook URLs). A reverse proxy in front of Webhooks should leave those paths out of its access logs, like the server's [credential URLs](#keep-credentials-out-of-access-logs); the app's own log never records a path.
 
 ## Moving an app between servers
 

@@ -10,11 +10,45 @@ Your MCP server has events: a build finished, a reply arrived, a job is done. MC
 
 Your code is the same for every agent. The SDKs attach to the MCP server you already have.
 
-## Run it
+## Try it with your agent
 
-You need Docker. (Signing in to the console with `make run` also needs Go 1.27 and Node 22 or later.) In a clone of this repository:
+Webhooks (`apps/try`) is a small app on this server that gives you a webhook URL: each POST to it wakes the agent watching it. It needs Docker, and no code. (To see a wake without running anything, use the hosted one at https://try.wakeshift.ai.) In a clone of this repository:
 
 ```sh
+sh deploy/webhooks-env.sh                        # once: writes .env with fresh keys and secrets
+docker compose --profile webhooks up --build     # or both at once: make webhooks
+```
+
+1. Open http://localhost:8380 and choose **Get a link**.
+2. Pick your agent on the link's page (Claude Code, Codex, Cursor, opencode and others) and run the command it shows, such as `claude mcp add --transport http webhooks http://localhost:8380/t/…/mcp`. Then ask the agent to watch for webhooks.
+3. Post to the webhook URL the page shows:
+
+   ```sh
+   curl -X POST 'http://localhost:8380/in/…' -H 'Content-Type: application/json' -d '{"hello":"world"}'
+   ```
+
+   The agent wakes with what you posted, and the page shows the post arrive. (Without the `Content-Type`, curl sends a form, and the agent gets it as one.)
+
+Claude Code is woken with nothing more to install (it runs a background wait). Codex and the other agents that need Wakeshift's connector need this server to serve it ([the connector and installs](docs/self-hosting.md#the-connector-and-installs)).
+
+Everything listens on `127.0.0.1` only. `docker compose --profile webhooks down -v` stops it and removes its data. Plain `docker compose up` leaves Webhooks out. Its settings are in [self-hosting](docs/self-hosting.md#webhooks).
+
+## Run it
+
+### Prerequisites
+
+- Git to clone this repository and `openssl` to generate the server secret.
+- A running Docker engine with the Compose plugin. On macOS, [install and open Docker Desktop](https://docs.docker.com/desktop/setup/install/mac-install/) for your Mac's chip. Complete its first-run prompts and wait for the engine to start. On Linux, your user needs access to the Docker daemon: add it to the `docker` group, or the first command fails with permission denied. Run `docker compose version` and `docker info` before continuing. If Docker Desktop is running but its CLI is missing on macOS, open a new terminal or add `$HOME/.docker/bin` to PATH when using Docker Desktop's user CLI installation.
+- Port 8370 free for Wakeshift. Compose also uses port 5439 for Postgres. See the override below if 5439 is in use.
+- For the JavaScript example, Node.js 22.12 or later and npm. Check them with `node --version` and `npm --version`.
+- To test a real wake, install one interactive harness (`claude` or `codex`) and have a way to authenticate. The user enters their Anthropic API key locally for Claude Code or completes `codex login` in a browser for Codex. Have the user handle sign-in and hook approval in their own terminal. Keep API keys out of chat and source control.
+- Install Go 1.27 to build the Codex connector, render a local Claude Code marketplace, or run the console with `make run`. Check `go version` from the clone. The Codex installer also needs `curl` and `shasum` or `sha256sum`. The console also needs Node.js.
+
+Clone this repository and run the following from the clone. Keep this terminal open so the server stays running.
+
+```sh
+git clone https://github.com/wakeshift/server.git
+cd server
 docker compose run --build --rm --no-deps --entrypoint /appkey server -app example
 export WAKESHIFT_APPS='<the JSON after WAKESHIFT_APPS= in what it printed>'
 export WAKESHIFT_SECRET_KEY=$(openssl rand -base64 48)
@@ -32,14 +66,17 @@ To stop, press Ctrl-C; `docker compose down -v` then removes the database. Apps 
 
 ### 1. Attach the SDK
 
-In your MCP server (TypeScript here; [Python](https://github.com/wakeshift/wakeshift-python) and [Go](https://github.com/wakeshift/wakeshift-go) work the same way):
+In a second terminal, create a directory for the JavaScript example or use your existing MCP server's project. The [Python](https://github.com/wakeshift/wakeshift-python) and [Go](https://github.com/wakeshift/wakeshift-go) SDKs are also available.
 
 ```sh
 npm install @wakeshift/sdk @modelcontextprotocol/server zod
 ```
 
-```ts
+Save this example as `server.mjs`. Export the `WAKESHIFT_KEY` printed by `/appkey` and set `WAKESHIFT_CORE=http://localhost:8370` in the terminal that will launch your harness.
+
+```js
 import { McpServer } from "@modelcontextprotocol/server"
+import { StdioServerTransport } from "@modelcontextprotocol/server/stdio"
 import { Wakeshift } from "@wakeshift/sdk"
 import { z } from "zod"
 
@@ -53,7 +90,12 @@ export const buildFinished = wake.defineEvent("build.finished", {
   public: true, // open to subscribe_events and to MCP Events clients
 })
 
-const attached = wake.attach(server)
+if (process.argv[2] === "emit") {
+  await buildFinished.emit({ repo: "api" }, { status: "passed" })
+} else {
+  wake.attach(server)
+  await server.connect(new StdioServerTransport())
+}
 ```
 
 `attach` answers `events/list`, `events/subscribe`, `events/poll` and `events/stream`, and adds a `subscribe_events` tool for agents whose clients don't speak MCP Events. Tools of your own can subscribe the conversation that called them too ([events](https://wakeshift.ai/docs/events)), and [who may subscribe](https://wakeshift.ai/docs/who-may-subscribe) covers `personal`, `authorize` and the default, where only your tools subscribe.
@@ -71,7 +113,11 @@ Each POST to `url` emits one occurrence, with the body as its payload. Or emit f
 ### 3. Get push, and wake an agent
 
 - **A client that speaks MCP Events** (Mastra, opencode 2.4 and later) subscribes to `build.finished` itself and gets each occurrence on its `events/stream` request, in order, with no public URL. A native subscription to a `public` event belongs to a user, so it needs your server's sign-in (`attach`'s `identify`); without sign-in, a tool of yours hands the client a one-time voucher instead ([who may subscribe](https://wakeshift.ai/docs/who-may-subscribe)).
-- **Claude Code** subscribes with `subscribe_events` when you ask it to watch the build, and wakes in the same conversation when the webhook arrives, with nothing installed. Codex, Cursor and the others wake the way [docs/harnesses.md](docs/harnesses.md) describes; their one-time installs trust only your server, once it serves the connector or a plugin marketplace rendered for it ([self-hosting](docs/self-hosting.md#the-connector-and-installs)).
+- **Claude Code** can wake through a background Monitor. To test hook-based wakes, render a [marketplace for your server](docs/self-hosting.md#the-connector-and-installs), add its local path with `claude plugin marketplace add /absolute/path/to/agent-plugins`, and install with `claude plugin install wakeshift@wakeshift`. Register the example with `claude mcp add --scope user example -- node /absolute/path/to/server.mjs`. Open an interactive `claude` session.
+- **Codex** needs a connector that trusts this server. Follow [the connector build and Compose volume steps](docs/self-hosting.md#the-connector-and-installs), then download the local installer with `curl --fail --silent --show-error http://localhost:8370/install/codex.sh -o install-codex.sh` and run `sh install-codex.sh`. Register the example with `codex mcp add example -- node /absolute/path/to/server.mjs`. Open an interactive session with plain `codex` and approve the Wakeshift hooks when prompted. Idle wakes need Codex’s background server. Put any configuration overrides in `config.toml` and launch without `-c` or `--no-daemon`. If you use a throwaway `CODEX_HOME` on macOS, choose a short absolute path so Wakeshift can connect to the Codex control socket.
+- For other agents, see [docs/harnesses.md](docs/harnesses.md).
+
+In Claude Code or Codex, ask: “Use the example MCP server's subscribe_events tool to watch build.finished for repo api. Then stop and wait. Do not poll.” Confirm the subscription succeeded and wait for the session to become idle. From a separate terminal with the same app key and core URL, run `node /absolute/path/to/server.mjs emit`. The idle conversation should wake and receive the event. Test one harness at a time so each wake is easy to verify.
 
 Each wake arrives marked as information from your app, never as the user speaking.
 
@@ -95,7 +141,7 @@ Each wake arrives marked as information from your app, never as the user speakin
 Everything an app or an agent's machine runs is open source too, under the same license:
 
 - **SDKs:** [TypeScript](https://github.com/wakeshift/wakeshift-node) (`@wakeshift/sdk`), [Python](https://github.com/wakeshift/wakeshift-python) (`wakeshift`), [Go](https://github.com/wakeshift/wakeshift-go). Any other language works over the [HTTP API](https://wakeshift.ai/docs/http-api).
-- **The connector and the bridges:** [wakeshift/connectors](https://github.com/wakeshift/connectors): the `wakeshift` program with its hooks for each harness, the OpenClaw plugin, the npm packages for opencode, pi and Cursor, and `wakeshift-cli`.
+- **The connector and the bridges:** [wakeshift/connectors](https://github.com/wakeshift/connectors): the `wakeshift` program with its hooks for each harness, the OpenClaw plugin, the npm packages for opencode, pi and Cursor, and the developers' CLI, `@wakeshift/cli`.
 - **Plugins:** [wakeshift/agent-plugins](https://github.com/wakeshift/agent-plugins) (Claude Code, Codex, Copilot CLI, Cursor), [wakeshift/antigravity-plugin](https://github.com/wakeshift/antigravity-plugin), [wakeshift/hermes-plugin](https://github.com/wakeshift/hermes-plugin).
 - **Example apps:** [wakeshift/apps](https://github.com/wakeshift/apps): Agent Chat, Webhooks, the games, Slackline.
 

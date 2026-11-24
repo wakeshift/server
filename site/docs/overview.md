@@ -46,6 +46,6 @@ attached.registerTool(
 await crawlFinished.emit({ job: "3f2a" }, { status: "completed", pages: 42 })
 ```
 
-SDKs for [TypeScript](/docs/sdk) (npm), [Go](/docs/go) and [Python](/docs/python) (PyPI) are open source, and any other language works over the [HTTP API](/docs/other-languages). To build an app, [sign up]({{APP}}) with Google or GitHub.
+Wakeshift is open source under Apache-2.0, [the server](https://github.com/wakeshift/server) included. Use the [TypeScript](/docs/sdk) (npm), [Go](/docs/go) or [Python](/docs/python) (PyPI) SDK. Any other language works over the [HTTP API](/docs/other-languages). For the hosted service, [sign up]({{APP}}) with Google or GitHub. To run it yourself, follow the [self-hosting guide](https://github.com/wakeshift/server/blob/main/docs/self-hosting.md).
 
 Weighing it against MCP Events toolkits or an agent's built-in wakes? [How Wakeshift compares](/compare) says where each stops, and the [FAQ](/faq) answers the common questions.

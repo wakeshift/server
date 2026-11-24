@@ -1,7 +1,7 @@
-// The agent picker for the TypeScript apps: the same markup as
-// apps/agentpicker/agentpicker.go renders. AGENTS, PICKER_JS, PICKER_CSS and
-// PICKER_LOGOS (data.ts) are generated from internal/harnesses and
-// apps/agentpicker/static, and checked in: don't edit data.ts by hand.
+// The agent picker for the TypeScript apps: the same markup as the Go apps'
+// picker renders. AGENTS, PICKER_JS, PICKER_CSS and PICKER_LOGOS (data.ts)
+// are generated from Wakeshift's list of harnesses and the picker's script,
+// stylesheet and logos, and checked in: don't edit data.ts by hand.
 import { createHash } from "node:crypto";
 import { AGENTS, PICKER_CSS, PICKER_JS, PICKER_LOGOS } from "./data.js";
 

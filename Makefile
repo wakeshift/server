@@ -1,4 +1,4 @@
-.PHONY: build web db test test-go lint run gate bench-test bench-dry-run image clean
+.PHONY: build web db test test-go lint run gate gate-webhooks webhooks try-test bench-test bench-dry-run image clean
 
 # The build's version: when it was built (UTC) and from which commit, e.g.
 # 2026.11.20.1435+91faaf7. The connectors send theirs, and the server
@@ -63,6 +63,25 @@ run: build db
 # event and a signed webhook delivered on push to an MCP Events client.
 gate:
 	go run ./internal/releasegate
+
+# The same with Webhooks (apps/try, the profile webhooks) too: a link from
+# its page, an MCP client that calls watch as Claude Code does, a curl-style
+# POST to the webhook URL, and the event arriving on the client's wait.
+gate-webhooks:
+	go run ./internal/releasegate -webhooks
+
+# Webhooks with the server, at http://localhost:8380: .env's keys and
+# secrets once (deploy/webhooks-env.sh), then docker compose with the
+# profile webhooks.
+webhooks:
+	sh deploy/webhooks-env.sh
+	docker compose --profile webhooks up --build
+
+# Webhooks' own tests (apps/try, Node 26 or newer): type check, unit tests,
+# then end to end against a server built from this tree.
+try-test: db
+	cd sdk/typescript && npm ci --ignore-scripts --no-fund --no-audit && npm run build
+	cd apps/try && npm ci --ignore-scripts --no-fund --no-audit && npm run lint && WAKESHIFT_TEST_DATABASE_URL="$(TEST_DATABASE_URL)" npm test && WAKESHIFT_TEST_DATABASE_URL="$(TEST_DATABASE_URL)" sh scripts/e2e.sh
 
 # The harness runner (bench/, Node 26 or newer; bench/README.md): its unit
 # tests, and a dry run on its fake harness, which needs no agent, account

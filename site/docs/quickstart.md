@@ -8,6 +8,8 @@ Build a crawler whose `start_crawl` tool wakes the conversation that started a c
 - For step 1's `init`: Node 22 or later, whatever your server's language. Step 1 has a way without Node.
 - Claude Code, to watch the wake.
 
+> **Running Wakeshift yourself?** This page uses the hosted service. Follow the [self-hosting guide](https://github.com/wakeshift/server/blob/main/docs/self-hosting.md) to start the server and create your app's key, then set `WAKESHIFT_CORE` to its URL in `.env`. The rest of this page is the same.
+
 > **Using a coding agent?** Paste the prompt below into Claude Code, Codex or another coding agent, in your MCP server's repository. It sets up your app (you sign in once), proposes events from your server's own tools for you to pick, adds them, and checks that an agent really wakes. It follows [AGENTS.md](/AGENTS.md); [llms.txt](/llms.txt) links every docs page as Markdown. The rest of this page is the same thing by hand.
 
 ```text Prompt for your coding agent

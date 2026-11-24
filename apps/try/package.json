@@ -1,0 +1,32 @@
+{
+  "name": "@wakeshift/try",
+  "version": "0.1.0",
+  "description": "try.wakeshift.ai: a webhook URL that wakes your agent.",
+  "license": "Apache-2.0",
+  "private": true,
+  "type": "module",
+  "main": "./dist/src/main.js",
+  "engines": {
+    "node": ">=26"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "lint": "tsc -p tsconfig.json --noEmit",
+    "start": "node dist/src/main.js",
+    "test": "tsc -p tsconfig.json && TRY_HOSTED=1 node --test 'dist/test/unit.test.js' 'dist/test/analytics.test.js'",
+    "e2e": "sh scripts/e2e.sh"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/node": "^2.1.2",
+    "@modelcontextprotocol/server": "^2.4.0",
+    "@types/pg": "^8.23.1",
+    "@wakeshift/sdk": "file:../../sdk/typescript",
+    "pg": "^8.23.1",
+    "zod": "^4.6.7"
+  },
+  "devDependencies": {
+    "@modelcontextprotocol/client": "^2.4.0",
+    "@types/node": "^26.6.6",
+    "typescript": "^5.9.3"
+  }
+}

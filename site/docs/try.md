@@ -97,7 +97,7 @@ The page shows your webhook URL and a `curl` line for it, which sends JSON. To s
 curl -H 'Content-Type: text/plain' --data-binary 'CI failed on main' <your webhook URL>
 ```
 
-Your agent wakes with a line that says what came and how much, then as much of the body as fits. JSON, forms and text all work; the agent gets the parsed body as the event's data. GitHub, Stripe and Linear events get a line of their own, such as `GitHub workflow_run completed: failure on main (tests) in acme/api` or `Stripe invoice.payment_failed: in_…, USD 20.00, open (evt_…)`. The page lists each post as it arrives, how many watching conversations it reached, and whether an agent is connected right now.
+Your agent wakes with a line that says what came and how much, then as much of the body as fits. JSON, forms and text all work; the agent gets the parsed body as the event's data. Events posted to a GitHub, Stripe or Linear URL (see below) get a line of their own, such as `GitHub workflow_run completed: failure on main (tests) in acme/api` or `Stripe invoice.payment_failed: in_…, USD 20.00, open (evt_…)`. Anyone with the open URL can send what those services send, so your agent reads a post there as unverified, whatever it says it is. The page lists each post as it arrives, how many watching conversations it reached, and whether an agent is connected right now.
 
 If a sender retries, send the same `Idempotency-Key` header and your agent is woken once. GitHub's, Stripe's and Linear's own retries of an event are recognized without it.
 
@@ -119,7 +119,8 @@ The try app gives your agent `watch` and `unwatch`, `recent_posts` (the last 10 
 ## Limits
 
 - 60 posts an hour and 500 a day for each URL. Refused posts don't count; retries do, though your agent is woken once for them. These are lower than an app's [publish URLs](/docs/publish-urls), which take 60 a minute.
-- Bodies up to 64 KB.
+- 1,000 posts an hour from one address, across all webhooks.
+- Bodies up to 64 KB, sent within 10 seconds.
 - One wake brings your agent at most 20 posts. If more arrive in a burst, the rest come in the next wake, as soon as the agent goes back to waiting. `recent_posts` gives the last 10 in full.
 - A link expires after a week without use.
 - The live view lists only the first few refused or rate-limited posts each minute one by one, so a flood of them doesn't push real posts out of view. The rest are counted in one line once the minute ends, with the statuses they got.

@@ -10,6 +10,7 @@ This repository is the Wakeshift server: it holds MCP Events subscriptions for a
 - `pkg/wakeshift/` is the Go SDK.
 - `web/` is the console (React, TypeScript, Vite, Tailwind), embedded from `web/dist`.
 - `bench/` is the harness runner that reproduces the harness matrix with real agents.
+- `apps/try/` is Webhooks (Node, on the TypeScript SDK in `sdk/typescript/`): a webhook URL that wakes the agent watching it, which `docker compose --profile webhooks` runs beside the server. `make try-test` tests it; `make gate-webhooks` runs it end to end.
 - `site/docs/` is the source of the developer documentation at https://wakeshift.ai/docs (read it there: its links are site paths and some pages hold template placeholders); `docs/` covers MCP Events, the harnesses and self-hosting.
 
 ## Running the tests

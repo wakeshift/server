@@ -22,6 +22,15 @@
 //  6. reads both, in order, as notifications/events/event on the client's
 //     stream.
 //
+// With -webhooks it also starts Webhooks (apps/try, the compose profile
+// webhooks), registered with a second fresh key, and then (webhooks.go):
+//
+//  7. gets a link from its page, as a person does;
+//  8. connects to the link's MCP URL as Claude Code, calls watch, and runs
+//     the wait the result says to run (as Claude Code's Monitor does);
+//  9. POSTs {"hello":"world"} (JSON) to the webhook URL, as curl does, and reads
+//     the event on that wait.
+//
 // It stops the services (docker compose down -v) unless -keep is given,
 // printing the server's log first when a step failed. It wakes no real
 // agent: the bridges (connectors and plugins) are tested in their own
@@ -77,8 +86,10 @@ func main() {
 	core := flag.String("core", "http://localhost:8370", "the server's URL, as docker-compose.yml publishes it (its WAKESHIFT_PUBLIC_URL)")
 	compose := flag.Bool("compose", true, "start the server with docker compose (false: one is running at -core, with the app's key from WAKESHIFT_KEY)")
 	keep := flag.Bool("keep", false, "leave the services running")
+	webhooks := flag.Bool("webhooks", false, "also start Webhooks (the compose profile webhooks) and wake a watching client with a POST to a webhook URL")
+	webhooksURL := flag.String("webhooks-url", "http://localhost:8380", "with -webhooks: Webhooks' URL, as docker-compose.yml publishes it (with -compose=false, one must already be running there)")
 	flag.Parse()
-	if err := run(*core, *compose, *keep); err != nil {
+	if err := run(*core, *compose, *keep, *webhooks, *webhooksURL); err != nil {
 		fmt.Fprintln(os.Stderr, "releasegate: FAIL:", err)
 		os.Exit(1)
 	}
@@ -87,7 +98,7 @@ func main() {
 
 func step(format string, a ...any) { fmt.Printf("releasegate: "+format+"\n", a...) }
 
-func run(core string, compose, keep bool) (err error) {
+func run(core string, compose, keep, webhooks bool, webhooksURL string) (err error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Minute)
 	defer cancel()
 
@@ -102,17 +113,42 @@ func run(core string, compose, keep bool) (err error) {
 		}
 		secret := make([]byte, 48)
 		rand.Read(secret)
-		env := append(os.Environ(), "WAKESHIFT_APPS="+apps, "WAKESHIFT_SECRET_KEY="+base64.StdEncoding.EncodeToString(secret))
+		env := append(os.Environ(), "WAKESHIFT_SECRET_KEY="+base64.StdEncoding.EncodeToString(secret))
+		profile := []string{"compose"}
+		what := "Postgres 17, the server"
+		if webhooks {
+			// Webhooks' own key, registered beside the gate's app, and the
+			// secret that signs its links (as deploy/webhooks-env.sh makes them).
+			wseed := make([]byte, ed25519.SeedSize)
+			rand.Read(wseed)
+			wkey, wapps, err := appkey.ForServer("webhooks", "Webhooks", wseed)
+			if err != nil {
+				return err
+			}
+			if apps, err = joinApps(apps, wapps); err != nil {
+				return err
+			}
+			tsecret := make([]byte, 48)
+			rand.Read(tsecret)
+			env = append(env, "WEBHOOKS_KEY="+wkey, "WEBHOOKS_SECRET="+base64.StdEncoding.EncodeToString(tsecret))
+			profile = append(profile, "--profile", "webhooks")
+			what += ", Webhooks"
+		}
+		env = append(env, "WAKESHIFT_APPS="+apps)
+		dc := func(args ...string) []string { return append(append([]string{}, profile...), args...) }
 		if !keep {
 			defer func() {
 				if err != nil {
-					docker(context.Background(), env, os.Stderr, "compose", "logs", "--no-color", "server")
+					docker(context.Background(), env, os.Stderr, dc("logs", "--no-color", "server")...)
+					if webhooks {
+						docker(context.Background(), env, os.Stderr, dc("logs", "--no-color", "webhooks")...)
+					}
 				}
-				docker(context.Background(), env, os.Stdout, "compose", "down", "-v")
+				docker(context.Background(), env, os.Stdout, dc("down", "-v")...)
 			}()
 		}
-		step("1. docker compose up --build (Postgres 17, the server)")
-		if err := docker(ctx, env, os.Stdout, "compose", "up", "-d", "--build", "--wait"); err != nil {
+		step("1. docker compose up --build (%s)", what)
+		if err := docker(ctx, env, os.Stdout, dc("up", "-d", "--build", "--wait")...); err != nil {
 			return fmt.Errorf("docker compose up: %w", err)
 		}
 	} else if key == "" {
@@ -183,7 +219,26 @@ func run(core string, compose, keep bool) (err error) {
 	}
 
 	step("6. both delivered on push, in order")
-	return expectEvent(stream, "webhook")
+	if err := expectEvent(stream, "webhook"); err != nil {
+		return err
+	}
+	if webhooks {
+		return gateWebhooks(ctx, webhooksURL)
+	}
+	return nil
+}
+
+// joinApps is two WAKESHIFT_APPS lists as one.
+func joinApps(a, b string) (string, error) {
+	var x, y []map[string]any
+	if err := json.Unmarshal([]byte(a), &x); err != nil {
+		return "", err
+	}
+	if err := json.Unmarshal([]byte(b), &y); err != nil {
+		return "", err
+	}
+	out, err := json.Marshal(append(x, y...))
+	return string(out), err
 }
 
 // docker runs docker with args in the current directory (the tree's root).
